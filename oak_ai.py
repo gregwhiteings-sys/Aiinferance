@@ -24,6 +24,9 @@ def build_pipeline(dai, blob, recording=False):
     camera.setFps(15)
     if recording:
         # NV12 camera.video feeds the hardware encoder; AI/preview remain unchanged.
+        # video is a crop of ISP output, not a resize. Scale the entire 1080p
+        # image first, so video and its derived preview keep the full 16:9 FOV.
+        camera.setIspScale(1,3)
         camera.setVideoSize(640,360)
         encoder=p.create(dai.node.VideoEncoder)
         encoder.setDefaultProfilePreset(15,dai.VideoEncoderProperties.Profile.H264_MAIN)

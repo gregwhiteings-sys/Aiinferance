@@ -42,7 +42,10 @@ def run(app_module, output):
                     persist=True,tracker='bytetrack.yaml',verbose=False)
         stage='OAK blob, pipeline and CPU tracker adapter'
         from oak_ai import build_pipeline, OakTracker
-        build_pipeline(depthai, app_module.resource_path('tyre_detector_oak.blob'),recording=True)
+        oak_pipeline=build_pipeline(depthai, app_module.resource_path('tyre_detector_oak.blob'),recording=True)
+        camera=next(node for node in oak_pipeline.getAllNodes() if isinstance(node,depthai.node.ColorCamera))
+        assert camera.getIspSize()==camera.getVideoSize()==(640,360), 'Camera recording crops the full sensor image'
+        assert camera.getPreviewSize()==(480,270)
         raw=np.zeros((6,3024),dtype=np.float32)
         raw[:,0]=[192,192,80,80,.95,.02]
         adapter=OakTracker()

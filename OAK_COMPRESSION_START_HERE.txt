@@ -1,3 +1,13 @@
+FULL FIELD-OF-VIEW CORRECTION
+
+The earlier compression build requested a 640x360 centre crop of the 1080p
+ISP image. That also narrowed the derived live preview and AI image. This
+version first scales the complete 1920x1080 ISP image by 1/3 to 640x360,
+then uses the entire result for video, preview and detection. No camera
+repositioning or compensating count-line adjustment should be needed.
+Verify the restored view against the previous wide view after rebuilding.
+Live hardware validation is still needed.
+
 OAK VIDEO COMPRESSION UPDATE
 
 Upload the extracted source files to the existing GitHub repository, including
