@@ -31,7 +31,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force build_logs | Out-Null
-          $required = @('TyreTrack_Production_Monitor.py','tyre_detector.pt','count_line.py','hourly_dashboard.py','BUILD_WINDOWS.py','requirements-windows.txt','build_support/smoke_test.py','foreign_alarm.py','oak_ai.py','background_export.py','tyre_detector_oak.blob','foreign_model/foreign_object_detector_DEMO.pt')
+          $required = @('TyreTrack_Production_Monitor.py','tyre_detector.pt','count_line.py','hourly_dashboard.py','BUILD_WINDOWS.py','requirements-windows.txt','build_support/smoke_test.py','foreign_alarm.py','oak_ai.py','oak_recording.py','background_export.py','tyre_detector_oak.blob','foreign_model/foreign_object_detector_DEMO.pt')
           foreach ($path in $required) {
             if (!(Test-Path -LiteralPath $path)) { throw "Missing repository-root file: $path. Extract the source ZIP before uploading; do not upload only the ZIP." }
           }
@@ -60,6 +60,8 @@ jobs:
 
       - name: Validate application logic
         run: |
+          python oak_recording_test.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python gui_render_test.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python dashboard_async_test.py
