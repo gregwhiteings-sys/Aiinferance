@@ -60,6 +60,8 @@ jobs:
 
       - name: Validate application logic
         run: |
+          python oak_fov_test.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python oak_recording_test.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python gui_render_test.py
