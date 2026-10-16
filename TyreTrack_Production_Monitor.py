@@ -2139,33 +2139,29 @@ class VideoLabel(QLabel):
         self.drag_mode = None
         self.setCursor(Qt.CrossCursor)
 
-    def set_frame(self, frame):
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        height, width, channels = rgb.shape
+    @staticmethod
+    def prepare_frame(frame):
+        # Qt supports BGR888 in the pinned Qt 5.15 runtime: no OpenCV RGB conversion.
+        height, width = frame.shape[:2]
+        image = QImage(frame.data, width, height, frame.strides[0], QImage.Format_BGR888).copy()
+        return QPixmap.fromImage(image)
 
-        image = QImage(
-            rgb.data,
-            width,
-            height,
-            channels * width,
-            QImage.Format_RGB888,
-        ).copy()
-        self._pix = QPixmap.fromImage(image)
-        self._redraw()
+    def set_frame(self, frame):
+        self.set_prepared_frame(self.prepare_frame(frame))
+
+    def set_prepared_frame(self, pixmap, redraw=True):
+        # QPixmap uses implicit sharing; both views reference the same native-size frame.
+        self._pix = pixmap
+        if self.text(): self.setText("")
+        if redraw: self._redraw()
 
     def resizeEvent(self, event):
         self._redraw()
         super().resizeEvent(event)
 
     def _redraw(self):
-        if self._pix is not None:
-            self.setPixmap(
-                self._pix.scaled(
-                    self.size(),
-                    Qt.KeepAspectRatio,
-                    Qt.FastTransformation,
-                )
-            )
+        # Paint scaling does not change QLabel's pixmap/size hint or trigger layout work.
+        self.update()
 
     def image_geometry(self):
         if self._pix is None:
@@ -2213,7 +2209,16 @@ class VideoLabel(QLabel):
         )
 
     def paintEvent(self, event):
+        started = time.monotonic()
         super().paintEvent(event)
+        if self._pix is not None:
+            ox, oy, width, height, _ = self.image_geometry()
+            image_painter = QPainter(self)
+            image_painter.setRenderHint(QPainter.SmoothPixmapTransform, False)
+            image_painter.drawPixmap(round(ox), round(oy), round(width), round(height), self._pix)
+            image_painter.end()
+        self._last_image_paint_ms = (time.monotonic()-started)*1000
+        self._max_image_paint_ms = max(getattr(self, '_max_image_paint_ms', 0), self._last_image_paint_ms)
 
         if not self.editable:
             return
@@ -2365,6 +2370,7 @@ class ControlScrollArea(QScrollArea):
 
 
 class Main(QMainWindow):
+    dashboard_ready = pyqtSignal(object)
     def __init__(self):
         super().__init__()
 
@@ -2405,6 +2411,8 @@ class Main(QMainWindow):
             APP_NAME + " - TOTAL TYRE COUNT [Controls 2026-10-12]"
         )
         self.resize(1450, 850)
+        self.dashboard_ready.connect(self.dashboard_data_ready)
+        self._dashboard_cache = None
         self.build_ui()
         self.refresh_counts()
 
@@ -3368,6 +3376,7 @@ class Main(QMainWindow):
         self.fullscreen_dialog = None
         self.fullscreen_video = None
 
+        self.video._redraw()
         if dialog is not None:
             dialog.deleteLater()
 
@@ -3378,10 +3387,12 @@ class Main(QMainWindow):
         if isinstance(value, tuple):
             frame, emitted_at = value
 
-        self.video.set_frame(frame)
-
+        started = time.monotonic()
+        prepared = self.video.prepare_frame(frame)
+        self.video.set_prepared_frame(prepared, redraw=self.fullscreen_video is None)
         if self.fullscreen_video is not None:
-            self.fullscreen_video.set_frame(frame)
+            self.fullscreen_video.set_prepared_frame(prepared)
+        self.gui_timing("frame_prepare", (time.monotonic()-started)*1000)
 
         if emitted_at is not None:
             if not hasattr(self, "_perf_gui_since"):
@@ -3425,7 +3436,26 @@ class Main(QMainWindow):
                 self._perf_gui_delay_sum = 0.0
                 self._perf_gui_delay_max = 0.0
 
+    def gui_timing(self, stage, milliseconds):
+        if not hasattr(self, "_gui_timings"):
+            self._gui_timings = {}
+            self._gui_timing_since = time.monotonic()
+        values = self._gui_timings.setdefault(stage, [0, 0.0, 0.0])
+        values[0] += 1; values[1] += milliseconds; values[2] = max(values[2], milliseconds)
+        now = time.monotonic()
+        if now-self._gui_timing_since >= 10:
+            details = ", ".join(f"{key}_avg_ms={total/max(1,count):.1f}, {key}_max_ms={maximum:.1f}"
+                                for key,(count,total,maximum) in sorted(self._gui_timings.items()))
+            active = self.fullscreen_video if self.fullscreen_video is not None else self.video
+            log("PERF GUI stages: "+details+f", image_paint_max_ms={getattr(active, '_max_image_paint_ms', 0):.1f}")
+            active._max_image_paint_ms = 0
+            self._gui_timings = {}; self._gui_timing_since = now
+
     def display_oak_preview(self):
+        now = time.monotonic()
+        previous = getattr(self, "_last_preview_callback", now)
+        self._last_preview_callback = now
+        self.gui_timing("preview_callback_interval", (now-previous)*1000)
         worker = self.worker
 
         if (
@@ -3793,13 +3823,14 @@ class Main(QMainWindow):
             self.test_events.append(elapsed)
 
         if self.worker is not None and self.worker.source_kind == "oak" and not self.worker.manual_test:
-            try:
-                export_daily_csv()
-                export_classification_csv()
-            except Exception as exc:
-                log(f"Daily CSV update failed: {exc}")
-
-        self.refresh_counts()
+            if not hasattr(self, "_csv_exporter"):
+                from background_export import CoalescedExport
+                self._csv_exporter = CoalescedExport(
+                    lambda: (export_daily_csv(), export_classification_csv()),
+                    lambda exc: log(f"Daily CSV update failed: {exc}"))
+            self._csv_exporter.request()
+        # SQLite already contains the count. The existing 1-second timer refreshes cards;
+        # never scan all reports or write CSV synchronously for every crossing.
 
     def refresh_production_hours(self, test_mode=False, test_seconds=0.0):
         if test_mode:
@@ -3816,8 +3847,8 @@ class Main(QMainWindow):
             best = max(completed, key=lambda s:s["count"]) if completed else None
             lowest = min(completed, key=lambda s:s["count"]) if completed else None
         else:
-            with sqlite3.connect(DB, timeout=15) as con:
-                slots, best, lowest = hourly_snapshot(con, source=OAK_NAME)
+            if self._dashboard_cache is None: return
+            slots, best, lowest = self._dashboard_cache['hourly']
 
         def display(slot):
             return f"H{slot['number']}  ·  {slot['count']:,}" if slot else "0  ·  waiting"
@@ -3862,8 +3893,9 @@ class Main(QMainWindow):
             colour = "#38D996" if completed else "#42B7FF" if current else "#84929E"
             tag = "✓" if completed else "live" if current else "–"
             self.production_slots[index].setText(f"H{index+1} {tag}\n{slot['count']:,}")
-            self.production_slots[index].setStyleSheet(
-                f"color:{colour};font-size:13px;font-weight:700;padding:2px;")
+            style = f"color:{colour};font-size:13px;font-weight:700;padding:2px;"
+            if self.production_slots[index].styleSheet() != style:
+                self.production_slots[index].setStyleSheet(style)
             if test_mode:
                 self.production_slots[index].setToolTip("Video playback time, starting at virtual 05:00")
             else:
@@ -3873,7 +3905,35 @@ class Main(QMainWindow):
                 active = index
         self.production_scroll.ensureWidgetVisible(self.production_slots[active])
 
-    def refresh_counts(self):
+    def request_dashboard_data(self):
+        if not hasattr(self, "_dashboard_loader"):
+            from background_export import CoalescedExport
+            def collect():
+                started = time.monotonic()
+                metrics = production_snapshot()
+                now = brisbane_now()
+                with sqlite3.connect(DB,timeout=15) as con:
+                    types = con.execute("SELECT tyre_type,COUNT(*) FROM counts WHERE source=? AND metric_utc>=? AND metric_utc<? GROUP BY tyre_type",
+                        (OAK_NAME,metrics['day_start'].timestamp(),min(now,metrics['day_end']).timestamp())).fetchall()
+                    hourly = hourly_snapshot(con, source=OAK_NAME)
+                best = best_daily_record()
+                self.dashboard_ready.emit(dict(metrics=metrics, types=types, hourly=hourly,
+                    best=best, collect_ms=(time.monotonic()-started)*1000))
+            self._dashboard_loader = CoalescedExport(collect,
+                lambda exc: log(f"Dashboard background refresh failed: {exc}"))
+        self._dashboard_loader.request()
+
+    def dashboard_data_ready(self, data):
+        if getattr(self, "closing", False): return
+        self._dashboard_cache = data
+        self.gui_timing("dashboard_collect_background", data['collect_ms'])
+        started = time.monotonic()
+        self.refresh_counts(use_cached=True)
+        self.gui_timing("dashboard_apply", (time.monotonic()-started)*1000)
+
+    def refresh_counts(self, use_cached=False):
+        if not use_cached:
+            self.request_dashboard_data()
         worker = self.worker
         test_mode = bool(worker is not None and (worker.source_kind == "video" or worker.manual_test))
         if test_mode:
@@ -3909,7 +3969,8 @@ class Main(QMainWindow):
             self.suv_lbl.setText(str(types.get("4x4",0)))
             self.refresh_production_hours(test_mode=True,test_seconds=elapsed)
         else:
-            metrics = production_snapshot()
+            if self._dashboard_cache is None: return
+            metrics = self._dashboard_cache['metrics']
             self.hour_lbl.setText(str(metrics["current_hour"]))
             self.day_lbl.setText(str(metrics["daily"]))
             self.total_lbl.setText(str(metrics["all_time"]))
@@ -3923,9 +3984,7 @@ class Main(QMainWindow):
             self.gap_lbl.setText(f"{metrics['no_flow_minutes']:.0f} min")
             self.production_status_lbl.setText(metrics["no_count_status"])
             self.all_time_lbl.setText("ALL TIME  " + str(metrics["all_time"]))
-            with sqlite3.connect(DB,timeout=15) as con:
-                types = con.execute("SELECT tyre_type,COUNT(*) FROM counts WHERE source=? AND metric_utc>=? AND metric_utc<? GROUP BY tyre_type",
-                                    (OAK_NAME,metrics['day_start'].timestamp(),min(brisbane_now(), metrics['day_end']).timestamp())).fetchall()
+            types = self._dashboard_cache['types']
             class_totals = {"passenger":0,"4x4":0}
             for name,n in types:
                 key=tyre_class_name(name)
@@ -3934,7 +3993,7 @@ class Main(QMainWindow):
             self.passenger_lbl.setText(str(class_totals['passenger']))
             self.suv_lbl.setText(str(class_totals['4x4']))
             self.refresh_production_hours()
-        best_date, best_count = best_daily_record()
+        best_date, best_count = self._dashboard_cache['best'] if self._dashboard_cache else (None, 0)
         self.best_daily_lbl.setText(f"{best_count:,} tyres")
         self.best_daily_lbl.setToolTip(f"Best production day: {best_date or 'No OAK counts yet'} · 05:00–17:05 Brisbane; includes today")
         if best_date:
@@ -4099,6 +4158,7 @@ class Main(QMainWindow):
     def tick(self):
         self.alarm_tick()
         self.schedule_tick()
+        refresh_started = time.monotonic()
         try:
             self.refresh_counts()
         except Exception:
@@ -4107,6 +4167,7 @@ class Main(QMainWindow):
                 + traceback.format_exc()
             )
 
+        self.gui_timing("dashboard_refresh", (time.monotonic()-refresh_started)*1000)
         # Manual OAK and video tests never send live production reports or alerts.
         if self.worker is not None and self.worker.manual_test:
             return
@@ -4158,6 +4219,11 @@ class Main(QMainWindow):
                 event.ignore()
                 return
 
+        loader = getattr(self, "_dashboard_loader", None)
+        if loader is not None: loader.wait(3)
+        exporter = getattr(self, "_csv_exporter", None)
+        if exporter is not None and not exporter.wait(3):
+            log("CSV export still finishing at close; committed counts remain in SQLite")
         self.stop_alarm_sound()
         event.accept()
 

@@ -46,6 +46,11 @@ def run(app_module, output):
         try:
             window=app_module.Main();window.clock.stop();window.resize(1366,768)
             window.show();qt.processEvents()
+            red=np.zeros((270,480,3),dtype=np.uint8);red[:,:,2]=255
+            window.video.set_frame(red);qt.processEvents()
+            assert window.video._pix.width()==480, 'Keep native frame size'
+            assert window.video._pix.toImage().pixelColor(240,135).red()>245, 'BGR rendering colour error'
+
             for index in range(window.controls_tabs.count()):
                 window.controls_tabs.setCurrentIndex(index)
                 # Allow layout/scrollbar resize events to settle, then check real geometry.

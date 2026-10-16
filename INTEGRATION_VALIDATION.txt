@@ -1,7 +1,21 @@
-SMOOTH PREVIEW UPDATE — LOCAL VALIDATION
-Passed real independent capture-thread simulation: latest live image stays separate from matched AI frame; unmatched output cannot reach counting; periodic diagnostics; thread shutdown.
-Passed OAK decoder/NMS, letterbox mapping, blob hash/pipeline construction, tracker continuity and missed-frame recovery.
-Passed real counting worker simulation with CPU tyre YOLO blocked: one count per tracked ID and class reconciliation.
-Passed existing single-line, 16/16 reporting, schedule boundaries, manual test isolation and alarm tests.
-Passed Qt layout checks at three window sizes, plus complete source runtime smoke test.
-Windows frozen executable build and live 15 FPS preview/AI throughput require GitHub and camera tests. This update adds diagnostics; it does not establish or guarantee removal of the six-second stall's cause.
+{
+  "status": "targeted-local-checks-passed",
+  "checks": [
+    "BGR colours and aspect ratio",
+    "native size Qt paint",
+    "single shared fullscreen frame",
+    "coalesced background CSV work and failure recovery",
+    "slow background database query does not block GUI",
+    "dashboard snapshot applied to counters",
+    "16/16 report checks",
+    "single line",
+    "schedule boundaries",
+    "manual test isolation",
+    "foreign alarm",
+    "Qt controls at three sizes"
+  ],
+  "pending": [
+    "Windows full source and frozen-runtime smoke tests in GitHub",
+    "production PC live rendering and camera test"
+  ]
+}
