@@ -12,10 +12,18 @@
     "schedule boundaries",
     "manual test isolation",
     "foreign alarm",
-    "Qt controls at three sizes"
+    "Qt controls at three sizes",
+    "two-line hour labels at three sizes",
+    "below-5 flow flash threshold",
+    "DepthAI 2.30 hardware encoder pipeline construction",
+    "H264 stream-copy MP4 playback, segment rotation and packet-gap recovery",
+    "recording disabled and midstream enable",
+    "H264 source preserved on MP4 remux failure",
+    "independent preview and exact AI sequence pairing with encoder branch"
   ],
   "pending": [
     "Windows full source and frozen-runtime smoke tests in GitHub",
-    "production PC live rendering and camera test"
+    "production PC live rendering and camera test",
+    "Live OAK hardware encoder and on-site recording performance"
   ]
 }

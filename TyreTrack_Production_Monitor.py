@@ -1029,8 +1029,8 @@ class OakSource:
     """
     Capture the newest OAK frame independently of inference.
 
-    If recording is enabled, write received frames as unannotated
-    640x360 MP4 segments, each at most 15 minutes long.
+    If recording is enabled, save on-device H264 as unannotated
+    640x360 MP4 segments, rotated at a keyframe after 15 minutes.
     """
 
     def __init__(self, ip=""):
@@ -1044,7 +1044,6 @@ class OakSource:
         self.reader = None
         self.preview_reader = None
         self.recorder = None
-        self.record_queue = queue.Queue(maxsize=60)
         self.record_drops = 0
         self.last_read_frame_at = None
 
@@ -1056,10 +1055,6 @@ class OakSource:
         self.last_read_sequence = 0
         self.reader_error = None
 
-        self.writer = None
-        self.segment_started = None
-        self.segment_path = None
-        self.segment_frames = 0
         self.capture_fps = 20.0
         self.previous_camera_sequence = None
         self.live_frame = None
@@ -1081,7 +1076,7 @@ class OakSource:
         self.worker_max_read_gap_ms = 0.0
 
         from oak_ai import build_pipeline
-        pipeline = build_pipeline(dai, resource_path("tyre_detector_oak.blob"))
+        pipeline = build_pipeline(dai, resource_path("tyre_detector_oak.blob"), recording=True)
         self.capture_fps = 15.0
         self.latest_neural_output = None
         self.last_read_neural_output = None
@@ -1104,6 +1099,7 @@ class OakSource:
 
             self.nn_queue = self.device.getOutputQueue("nn", maxSize=8, blocking=False)
             self.live_queue = self.device.getOutputQueue("live", maxSize=1, blocking=False)
+            self.encoded_queue = self.device.getOutputQueue("recording", maxSize=120, blocking=False)
             self.preview_reader = threading.Thread(target=self._preview_loop,
                 name="OAK independent live preview", daemon=True)
             self.preview_reader.start()
@@ -1113,51 +1109,13 @@ class OakSource:
                 daemon=True,
             )
             self.recorder = threading.Thread(target=self._record_loop,
-                                             name="OAK MP4 writer", daemon=True)
+                                             name="OAK H264 stream-copy recorder", daemon=True)
             self.recorder.start()
             self.reader.start()
 
         except Exception:
             self.release()
             raise
-
-    def _close_segment(self):
-        if self.writer is None:
-            return
-
-        self.writer.release()
-        log(
-            f"OAK recording closed: {self.segment_path}; "
-            f"frames written: {self.segment_frames}"
-        )
-        self.writer = None
-        self.segment_path = None
-        self.segment_frames = 0
-
-    def _open_segment(self, now):
-        self._close_segment()
-
-        folder = OAK_RECORDINGS / now.strftime("%Y-%m-%d")
-        folder.mkdir(parents=True, exist_ok=True)
-        path = folder / f"OAK_RGB_{now:%Y%m%d_%H%M%S_%f}.mp4"
-
-        writer = cv2.VideoWriter(
-            str(path),
-            cv2.VideoWriter_fourcc(*"mp4v"),
-            self.capture_fps,
-            (480, 270),
-        )
-        if not writer.isOpened():
-            raise RuntimeError(
-                f"Could not start OAK recording: {path}. "
-                "Check disk space and codec support."
-            )
-
-        self.writer = writer
-        self.segment_started = now
-        self.segment_path = path
-        self.segment_frames = 0
-        log(f"OAK recording started: {path}")
 
     def _packet_age_ms(self, packet):
         try:
@@ -1188,12 +1146,6 @@ class OakSource:
                     self.preview_last_received = received
                     self.preview_received += 1
                     self.preview_max_age_ms = max(self.preview_max_age_ms, age)
-                # Recording is fed by the independent camera stream, not AI output.
-                if RECORD_OAK_VIDEO:
-                    try:
-                        self.record_queue.put_nowait((frame, datetime.now()))
-                    except queue.Full:
-                        self.record_drops += 1
         except Exception as exc:
             self.live_error = str(exc)
             log("OAK live preview FAULT; counting stream remains independent: "+str(exc))
@@ -1214,7 +1166,7 @@ class OakSource:
                 f"max_capture_loop_pause_ms={self.max_capture_loop_gap_ms:.0f}, "
                 f"max_preview_loop_pause_ms={self.preview_max_loop_gap_ms:.0f}, "
                 f"max_worker_read_gap_ms={self.worker_max_read_gap_ms:.0f}, "
-                f"record_queue={self.record_queue.qsize()}, record_drops_total={self.record_drops}")
+                f"recording=on-device-H264, recording_packet_gaps={self.record_drops}")
             self.preview_received = 0
             self.preview_max_age_ms = 0.0
             self.preview_max_loop_gap_ms = 0.0
@@ -1323,24 +1275,25 @@ class OakSource:
             self.stop_event.set()
 
     def _record_loop(self):
+        from oak_recording import EncodedRecorder
+        recorder = EncodedRecorder(OAK_RECORDINGS, log, fps=self.capture_fps)
+        drained = 0
         try:
-            while not self.stop_event.is_set() or not self.record_queue.empty():
-                try:
-                    frame, received_at = self.record_queue.get(timeout=0.1)
-                except queue.Empty:
-                    if not RECORD_OAK_VIDEO:
-                        self._close_segment()
+            while not self.stop_event.is_set() or drained < 120:
+                if self.stop_event.is_set(): drained += 1
+                packet = self.encoded_queue.tryGet()
+                if packet is None:
+                    if self.stop_event.is_set(): break
+                    if not RECORD_OAK_VIDEO: recorder.close()
+                    self.stop_event.wait(.005)
                     continue
-                if (self.writer is None or
-                        (received_at-self.segment_started).total_seconds() >= 900):
-                    self._open_segment(received_at)
-                small_frame = cv2.resize(frame, (480, 270), interpolation=cv2.INTER_AREA)
-                self.writer.write(small_frame)
-                self.segment_frames += 1
+                recorder.feed(packet.getData(), datetime.now(), int(packet.getSequenceNum()),
+                              enabled=RECORD_OAK_VIDEO)
+                self.record_drops = recorder.gaps
         except Exception:
-            log("OAK MP4 writer failed; live counting continues:\n" + traceback.format_exc())
+            log("OAK H264 recording failed; live counting continues:\n" + traceback.format_exc())
         finally:
-            self._close_segment()
+            recorder.close()
 
     def read(self):
         """For inference: return the newest frame and its sequence."""
@@ -2414,6 +2367,10 @@ class Main(QMainWindow):
         self.dashboard_ready.connect(self.dashboard_data_ready)
         self._dashboard_cache = None
         self.build_ui()
+        self.flow_flash_timer = QTimer(self)
+        self.flow_flash_timer.setInterval(500)
+        self.flow_flash_timer.timeout.connect(self.flash_low_flow)
+        self._flow_flash_red = False
         self.refresh_counts()
 
         self.oak_preview_timer = QTimer(self)
@@ -2601,19 +2558,24 @@ class Main(QMainWindow):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setFixedHeight(42)
+        # Reserve separate space for the two text lines and horizontal scrollbar.
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         content = QWidget()
         row = QHBoxLayout(content)
-        row.setContentsMargins(0, 0, 0, 0)
+        row.setContentsMargins(0, 2, 0, 2)
         row.setSpacing(7)
         self.production_slots = []
         for index in range(24):
-            label = QLabel(f"H{index+1}  0")
+            label = QLabel(f"H{index+1} –\n0")
+            label.setStyleSheet("color:#84929E;font-size:13px;font-weight:700;padding:2px;")
             label.setAlignment(Qt.AlignCenter)
             label.setMinimumWidth(76)
             row.addWidget(label)
             self.production_slots.append(label)
         scroll.setWidget(content)
+        scroll.setFixedHeight(max(label.sizeHint().height() for label in self.production_slots)
+                              + 4 + scroll.horizontalScrollBar().sizeHint().height()
+                              + 2 * scroll.frameWidth() + 4)
         self.production_scroll = scroll
         history_layout.addWidget(scroll)
         production.addWidget(history_frame, 3)
@@ -2744,7 +2706,7 @@ class Main(QMainWindow):
         self.record_oak_checkbox = QCheckBox(
             "Record OAK video (MP4)"
         )
-        self.record_oak_checkbox.setToolTip("MP4 recordings use disk space")
+        self.record_oak_checkbox.setToolTip("H264 compressed on OAK; MP4 finalises every 15 minutes or when recording stops. Uses disk space.")
         self.record_oak_checkbox.setChecked(False)
         self.record_oak_checkbox.toggled.connect(
             set_oak_recording
@@ -3961,7 +3923,7 @@ class Main(QMainWindow):
             test_stamp = str(timedelta(seconds=int(test_starts[-1]))) if test_starts else "None"
             self.no_count_lbl.setText(f"{len(gaps)} · TEST {test_stamp}")
             self.no_count_lbl.setToolTip("Video elapsed time when the 10-minute threshold was reached")
-            self.flow_lbl.setText(f"{last_five / max(1/60, min(300, max(elapsed,1))) * 60:.1f} tyres per min")
+            self.set_flow_rate(last_five / max(1/60, min(300, max(elapsed,1))) * 60)
             self.gap_lbl.setText(f"{sum(gaps)/60:.0f} min")
             self.production_status_lbl.setText("TEST · NO COUNT" if elapsed >= 600 and (trailing >= 600 or not events) else "OAK MANUAL TEST" if worker.manual_test else "TEST MODE")
             self.all_time_lbl.setText("TEST SESSION  " + str(len(events)))
@@ -3980,7 +3942,7 @@ class Main(QMainWindow):
             self.no_count_lbl.setText(f"{metrics['no_count_incidents']} · {latest}")
             self.no_count_lbl.setToolTip("Brisbane alert threshold times (10 min without counts):\n" +
                                          "\n".join(t.strftime("%Y-%m-%d %H:%M:%S") for t in stamps))
-            self.flow_lbl.setText(f"{metrics['flow_per_minute']:.1f} tyres per min")
+            self.set_flow_rate(metrics['flow_per_minute'])
             self.gap_lbl.setText(f"{metrics['no_flow_minutes']:.0f} min")
             self.production_status_lbl.setText(metrics["no_count_status"])
             self.all_time_lbl.setText("ALL TIME  " + str(metrics["all_time"]))
@@ -4006,6 +3968,23 @@ class Main(QMainWindow):
         if getattr(self, "_last_dashboard_snapshot", 0) + 30 < time.monotonic():
             self._last_dashboard_snapshot = time.monotonic()
             self.grab().save(str(DASHBOARD_SNAPSHOT), "PNG")
+
+    def set_flow_rate(self, rate):
+        self.flow_lbl.setText(f"{rate:.1f} tyres per min")
+        if rate < 5:
+            if not self.flow_flash_timer.isActive():
+                self._flow_flash_red = False
+                self.flash_low_flow()
+                self.flow_flash_timer.start()
+        else:
+            self.flow_flash_timer.stop()
+            self._flow_flash_red = False
+            self.flow_lbl.setStyleSheet("")
+
+    def flash_low_flow(self):
+        self._flow_flash_red = not self._flow_flash_red
+        self.flow_lbl.setStyleSheet(
+            "color:#FF5C68;font-size:22px;font-weight:900;" if self._flow_flash_red else "")
 
     def reset_session(self):
         if (

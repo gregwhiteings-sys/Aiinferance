@@ -5,7 +5,8 @@ from pathlib import Path
 def run(app_module, output):
     stage="dependency imports"
     try:
-        import torch,torchvision,cv2,depthai,lap,optree,numpy as np
+        import torch,torchvision,cv2,depthai,lap,optree,av,numpy as np
+        from oak_recording import EncodedRecorder
         from scipy.linalg import cho_factor
         from ultralytics import YOLO
         from ultralytics.trackers.byte_tracker import BYTETracker
@@ -20,6 +21,20 @@ def run(app_module, output):
         cho_factor(np.eye(4))
         boxes=torch.tensor([[0.,0.,10.,10.],[1.,1.,9.,9.]])
         assert torchvision.ops.nms(boxes,torch.tensor([.9,.8]),.5).numel()==1
+        stage='H264 native libraries and stream-copy MP4 recording'
+        import tempfile
+        from datetime import datetime,timedelta
+        with tempfile.TemporaryDirectory() as folder:
+            recorder=EncodedRecorder(folder,lambda message:None)
+            with av.open(str(app_module.resource_path('test_data/oak_h264_sample.h264')),format='h264') as source:
+                packets=[bytes(p) for p in source.demux(video=0) if p.size]
+            for index,data in enumerate(packets):
+                recorder.feed(data,datetime(2026,10,16,5)+timedelta(seconds=index/15),index)
+            recorder.close()
+            files=list(Path(folder).rglob('*.mp4'))
+            assert len(files)==1, 'MP4 remux failed'
+            with av.open(str(files[0])) as recorded:
+                assert sum(1 for _ in recorded.decode(video=0))==45
         stage='tyre model load and ByteTrack'
         model=YOLO(str(app_module.resource_path('tyre_detector.pt')))
         assert model.task=='detect', f'Expected detection-only model, got {model.task}'
@@ -27,7 +42,7 @@ def run(app_module, output):
                     persist=True,tracker='bytetrack.yaml',verbose=False)
         stage='OAK blob, pipeline and CPU tracker adapter'
         from oak_ai import build_pipeline, OakTracker
-        build_pipeline(depthai, app_module.resource_path('tyre_detector_oak.blob'))
+        build_pipeline(depthai, app_module.resource_path('tyre_detector_oak.blob'),recording=True)
         raw=np.zeros((6,3024),dtype=np.float32)
         raw[:,0]=[192,192,80,80,.95,.02]
         adapter=OakTracker()
@@ -70,7 +85,7 @@ def run(app_module, output):
         finally:app_module.Main.tick=original_tick
         payload={'status':'passed','torch':torch.__version__,'torchvision':torchvision.__version__,
                  'numpy':np.__version__,'depthai':depthai.__version__,
-                 'checks':['imports','scipy','torchvision-nms','bundled-detection-model',
+                 'checks':['imports','H264-native-remux-and-MP4-playback','scipy','torchvision-nms','bundled-detection-model',
                            'CPU-inference-and-ByteTrack','OAK-blob-pipeline-and-tracker','foreign-model-CPU-inference','Qt-controls-layout']}
         Path(output).write_text(json.dumps(payload,indent=2));return 0
     except Exception:

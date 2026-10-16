@@ -10,7 +10,7 @@ SIZE=384
 PAD=84
 CONTENT_HEIGHT=216
 
-def build_pipeline(dai, blob):
+def build_pipeline(dai, blob, recording=False):
     if hashlib.sha256(Path(blob).read_bytes()).hexdigest()!=BLOB_SHA256:
         raise ValueError('OAK blob is missing or differs from the verified embedded-normalization trial')
     network=dai.OpenVINO.Blob(str(blob))
@@ -22,6 +22,19 @@ def build_pipeline(dai, blob):
     camera.setPreviewSize(480,270);camera.setPreviewKeepAspectRatio(True)
     camera.setInterleaved(False);camera.setColorOrder(dai.ColorCameraProperties.ColorOrder.RGB)
     camera.setFps(15)
+    if recording:
+        # NV12 camera.video feeds the hardware encoder; AI/preview remain unchanged.
+        camera.setVideoSize(640,360)
+        encoder=p.create(dai.node.VideoEncoder)
+        encoder.setDefaultProfilePreset(15,dai.VideoEncoderProperties.Profile.H264_MAIN)
+        encoder.setBitrateKbps(1500)
+        encoder.setKeyframeFrequency(15)
+        encoder.setNumBFrames(0)
+        encoder.input.setBlocking(False);encoder.input.setQueueSize(4)
+        camera.video.link(encoder.input)
+        encoded=p.create(dai.node.XLinkOut);encoded.setStreamName('recording')
+        encoded.input.setBlocking(False);encoded.input.setQueueSize(30)
+        encoder.bitstream.link(encoded.input)
     manip=p.create(dai.node.ImageManip)
     manip.initialConfig.setResizeThumbnail(SIZE,SIZE)
     manip.initialConfig.setFrameType(dai.ImgFrame.Type.RGB888p)

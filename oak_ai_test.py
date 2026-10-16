@@ -23,5 +23,5 @@ tracker.track_oak(frame,np.zeros(18144),.35,.5,False)
 r[:,0]=[192,110,80,60,.95,.02]
 result=tracker.track_oak(frame,r,.35,.5,False)
 assert int(result.boxes.id[0])==ids[0]
-build_pipeline(depthai,Path(__file__).parent/'tyre_detector_oak.blob')
+build_pipeline(depthai,Path(__file__).parent/'tyre_detector_oak.blob',recording=True)
 print('PASS: decode/NMS, letterbox geometry, padding rejection, malformed/empty output, ID continuity, missed frame recovery, blob hash and pipeline construction')

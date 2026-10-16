@@ -28,6 +28,23 @@ for width,height in [(1366,768),(1280,720),(1100,760)]:
                 x=control.mapTo(host,control.rect().topLeft()).x()
                 assert x>=0 and x+control.width()<=host.width(),(name,cls.__name__,x,control.width(),host.width())
         print('PASS',width,height,name,'page/viewport',host.width())
+    history=window.production_scroll
+    for label in window.production_slots:
+        assert label.height()>=label.sizeHint().height(), ('Clipped hour label',label.height(),label.sizeHint().height())
+    assert history.viewport().height()>=max(label.sizeHint().height() for label in window.production_slots)
+    print('PASS',width,height,'two-line hour labels clear of scrollbar')
+window.set_flow_rate(4.9)
+assert window.flow_flash_timer.isActive() and '#FF5C68' in window.flow_lbl.styleSheet()
+window.flash_low_flow()
+assert window.flow_lbl.styleSheet()==''
+window.flash_low_flow()
+assert '#FF5C68' in window.flow_lbl.styleSheet()
+for rate in (5.0,8.0):
+    window.set_flow_rate(rate)
+    assert not window.flow_flash_timer.isActive() and window.flow_lbl.styleSheet()==''
+window.set_flow_rate(0.0)
+assert window.flow_flash_timer.isActive()
+print('PASS: low flow flashes red below 5; 5 and above restore normal colour')
 window.close()
 # SQLite finalizers may retain temp files on Windows; never confuse layout results
 # with best-effort scratch cleanup in this isolated process.

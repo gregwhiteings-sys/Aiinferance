@@ -30,11 +30,11 @@ def main():
     # Source probe gives a useful diagnostic before spending time freezing.
     env=os.environ.copy();env['QT_QPA_PLATFORM']='offscreen';env['OMP_NUM_THREADS']='2'
     source_result=LOGS/'source-smoke.json'
-    run([sys.executable,'-m','compileall','-q','TyreTrack_Production_Monitor.py','count_line.py','hourly_dashboard.py','foreign_alarm.py','oak_ai.py','background_export.py','build_support'])
+    run([sys.executable,'-m','compileall','-q','TyreTrack_Production_Monitor.py','count_line.py','hourly_dashboard.py','foreign_alarm.py','oak_ai.py','oak_recording.py','background_export.py','build_support'])
     smoke([sys.executable,ROOT/'TyreTrack_Production_Monitor.py','--build-smoke-test',source_result],source_result,env,ROOT,240)
     command=[sys.executable,'-m','PyInstaller','--noconfirm','--clean','--onedir','--windowed',
              '--name','TyreTrack','--paths',ROOT,'--noupx',
-             '--hidden-import','background_export','--hidden-import','oak_ai','--hidden-import','count_line','--hidden-import','hourly_dashboard',
+             '--hidden-import','oak_recording','--collect-all','av','--hidden-import','background_export','--hidden-import','oak_ai','--hidden-import','count_line','--hidden-import','hourly_dashboard',
              '--hidden-import','build_support.smoke_test','--hidden-import','foreign_alarm',
              '--hidden-import','ultralytics.nn.tasks',
              '--hidden-import','ultralytics.trackers.byte_tracker',
@@ -47,6 +47,7 @@ def main():
              '--add-data',str(ROOT/'tyre_detector.pt')+';.',
              '--add-data',str(ROOT/'tyre_detector_oak.blob')+';.',
              '--add-data',str(ROOT/'oak_model_metadata.json')+';.',
+             '--add-data',str(ROOT/'test_data')+';test_data',
              '--add-data',str(ROOT/'foreign_model')+';foreign_model']
     if (ROOT/'tyrecycle_logo.png').exists():command+=['--add-data',str(ROOT/'tyrecycle_logo.png')+';.']
     command += [ROOT/'TyreTrack_Production_Monitor.py'];run(command)
@@ -73,6 +74,7 @@ def main():
     # Smoke-test DB and auto-generated email template must never ship as user data.
     for name in ['data','reports']:
         shutil.rmtree(BUNDLE/name,ignore_errors=True);(BUNDLE/name).mkdir()
+    shutil.copy2(ROOT/'OAK_COMPRESSION_START_HERE.txt',BUNDLE/'OAK_COMPRESSION_START_HERE.txt')
     shutil.copy2(ROOT/'GUI_RENDER_START_HERE.txt',BUNDLE/'GUI_RENDER_START_HERE.txt')
     shutil.copy2(ROOT/'SMOOTH_PREVIEW_START_HERE.txt',BUNDLE/'SMOOTH_PREVIEW_START_HERE.txt')
     shutil.copy2(ROOT/'OAK_ONBOARD_START_HERE.txt',BUNDLE/'OAK_ONBOARD_START_HERE.txt')

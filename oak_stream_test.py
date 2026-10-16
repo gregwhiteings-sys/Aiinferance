@@ -18,7 +18,7 @@ class Q:
  def tryGet(self):return self.items.pop(0) if self.items else None
 class Device:
  def __init__(self,*args):
-  self.queues={'live':Q([Packet(23)]),'rgb':Q([Packet(9),Packet(10)]),
+  self.queues={'recording':Q([]),'live':Q([Packet(23)]),'rgb':Q([Packet(9),Packet(10)]),
                'nn':Q([Packet(10,True),Packet(99,True)])}
  def getOutputQueue(self,name,**kw):return self.queues[name]
  def close(self):pass
@@ -43,3 +43,32 @@ finally:
  m.dai.Device=original
 assert not source.reader.is_alive() and not source.preview_reader.is_alive()
 print('PASS: independent preview, exact AI sequence match, no unmatched publication, periodic timing summary, clean thread shutdown')
+# Exercise the real source recording thread with camera-like encoded packets.
+import tempfile,av
+from pathlib import Path
+with av.open(str(Path(__file__).parent/'test_data/oak_h264_sample.h264'),format='h264') as fixture:
+ encoded=[bytes(p) for p in fixture.demux(video=0) if p.size]
+class EncodedPacket:
+ def __init__(self,index,data):self.index=index;self.data=data
+ def getSequenceNum(self):return self.index
+ def getData(self):return self.data
+class RecordingDevice(Device):
+ def __init__(self,*args):
+  super().__init__(*args)
+  self.queues['recording']=Q([EncodedPacket(i,p) for i,p in enumerate(encoded)])
+original_folder=m.OAK_RECORDINGS
+try:
+ with tempfile.TemporaryDirectory() as folder:
+  m.OAK_RECORDINGS=Path(folder);m.RECORD_OAK_VIDEO=True;m.dai.Device=RecordingDevice
+  source=m.OakSource('')
+  deadline=time.monotonic()+2
+  while source.encoded_queue.items and time.monotonic()<deadline:time.sleep(.005)
+  source.release()
+  assert not source.recorder.is_alive(), 'Recording thread did not finalise'
+  files=list(Path(folder).rglob('*.mp4'));assert len(files)==1,logs
+  with av.open(str(files[0])) as recorded:
+   assert sum(1 for _ in recorded.decode(video=0))==45
+finally:
+ if source:source.release()
+ m.dai.Device=original;m.OAK_RECORDINGS=original_folder;m.RECORD_OAK_VIDEO=False
+print('PASS: actual OakSource recording thread writes and finalises playable MP4 on shutdown')

@@ -10,3 +10,6 @@ optree==0.13.1
 lap==0.5.12
 torch==2.5.1+cpu
 torchvision==0.20.1+cpu
+
+# Bundled FFmpeg libraries: remux camera H264 into MP4, no PC video encoding.
+av==16.1.0
