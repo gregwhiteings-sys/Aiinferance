@@ -1,0 +1,74 @@
+TYRETRACK FOREIGN OBJECT — AUTOMATICALLY LABELLED DEMO DATASET
+
+START
+1. Extract the ZIP. Open review_auto_labels.html in Chrome/Edge.
+   Automatic proposed boxes are preloaded. Correct box extent/class, label any
+   missed foreign objects, then Approve. Download annotations.json to save.
+   Resume JSON reloads saved work. The page does not autosave.
+2. Open colab.research.google.com → Upload notebook.
+   Select Train_Foreign_Objects_Colab.ipynb. Choose a T4 GPU runtime.
+3. Run the cells and upload this ZIP. No Google Drive is required.
+4. Prefer USE_REVIEWED_ANNOTATIONS=True to upload corrected annotations.
+   Or use the supplied automatic labels for an explicitly limited experiment.
+5. Set ACCEPT_SYNTHETIC_DEMO_AND_DRAFT_LABELS=True after inspecting the previews.
+6. Train, evaluate and download the DEMO model ZIP from the final cell.
+
+WHAT WAS ACTUALLY DONE
+- Verified clean and annotated source alignment at sampled frames using image
+  differences outside the prediction region; per-frame scores are recorded.
+- Extracted 366 clean 640x360 images every 2 seconds through 730 seconds, using
+  the part covered by the matching detections video. The clean video continues
+  to 899.15 seconds; its unannotated tail is not included as false negatives.
+- Recovered 777 rectangle proposals from existing colour-coded predictions.
+- Read cyan-box class text with OCR; unreadable classes were flagged, not guessed.
+- Reinterpreted tyre-with-rim source boxes as FITTED RIM because the boxes mostly
+  surround the rim face, not the whole tyre assembly. This avoids pretending
+  these are accurate whole-wheel labels.
+- Made conservative person-box extent proposals within the conveyor. Some
+  person boxes can still be incomplete or loose; they require review.
+- Visually checked cone crops. Orange vests were NOT accepted as cone evidence.
+  Red cone candidates were relabelled traffic_cone. Other colours may remain
+  incorrectly grouped as metal in source proposals and need review.
+- Excluded frames containing unreadable class proposals from the draft dataset.
+  Automatic boxes in images_all/labels_all still include these for correction.
+- Built YOLO detection folders and Colab training/export cells.
+
+CLASS IDs
+0 fitted_rim: rim visibly attached to a tyre; box around visible rim face.
+1 bare_rim: loose rim without an attached tyre.
+2 person: visible person/body. Review partial bodies/limbs carefully.
+3 metal_object: pipe, plate and similar metal items; source labels can be wrong.
+4 traffic_cone: cones, including red cones corrected from source metal labels.
+5 other_foreign_object: RESERVED for reviewed examples. In the correction tool,
+  unreadable proposals use this as a visible placeholder and are NOT trusted
+  other-object labels. There are no verified examples of this class in the
+  supplied draft training set. The model cannot learn this class yet.
+Normal tyres and fixed conveyor machinery are background.
+
+QUALITY LIMITS — PLEASE READ
+These are automatic pseudo-labels, not fully corrected human ground truth.
+Source objects appear digitally composited. Repeated objects and the same
+background occur in all splits. Thirty-second time gaps reduce adjacent-frame
+leakage but do not make the holdout independent; demo metrics may look too good.
+Missing predictions can leave unlabelled targets even in retained frames.
+The labels must be reviewed before calling this a dependable training dataset.
+Two initial clean frames are included as inspected normal-tyre backgrounds.
+
+Use separate real recordings/days with normal tyres, loose rims, rimmed tyres,
+and diverse actual foreign objects for field training/evaluation. Do not put a
+person on an operating conveyor to collect examples. This model is not a
+certified person-safety control. The current tyre-counting model is unchanged;
+foreign-detector integration and alarm behaviour need a separate app update.
+
+FILES
+annotation_summary.json: exact counts.
+auto_annotations.json: box proposals, OCR, methods, per-frame alignment checks.
+review_auto_labels.html: manual correction tool, clean images loaded locally.
+images_all, labels_all: full automatic review set (contains uncertain proposals).
+dataset: filtered YOLO train/val/test folders; train 0-508 sec,
+  validation 540-628 sec, test 660-730 sec; two 30-second buffer ranges excluded.
+previews: sampled annotated previews, not training images.
+Train_Foreign_Objects_Colab.ipynb: upload, optional reviewed-label import,
+  validation, preview, GPU training, test and download.
+
+Official format reference: https://docs.ultralytics.com/datasets/detect/

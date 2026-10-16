@@ -1,0 +1,40 @@
+TYRETRACK — SEGMENTATION REMOVED FROM CURRENT TRAINED MODEL
+
+The root tyre_detector.pt is now detection-only. It retains your trained
+Passenger and 4x4 box/classification weights. No retraining was performed.
+Original model was YOLO11s-seg; the retained backbone is still YOLO11s-sized.
+This is not a nano model, an OpenVINO export or an OAK hardware blob.
+
+WHAT WAS REMOVED
+Segment mask prototype module, mask-coefficient convolutions and mask metadata.
+The Segment head is replaced by its Detect base behaviour. Model metadata and
+DetectionModel class/task are updated; the checkpoint reloads as task=detect.
+All surviving state tensors were checked unchanged. FP16 save round-trip was
+checked lossless against the surviving trained tensors from this checkpoint.
+Parameters: 10,083,062 -> 9,428,566. Inference no longer computes segmentation.
+
+VERIFICATION
+Raw box/class outputs matched exactly at 320 and 480 tensor test sizes.
+Reloaded model .predict() ran successfully without masks. Boxes/classes/scores
+also matched exactly on 10 sampled frames from the supplied clean video at
+480 inference size. Detailed JSON reports and conversion code are in model_tools.
+No full-video counting-accuracy or Australian N5030 speed benchmark is claimed.
+
+APPLICATION CHANGES
+The latest complete app's source is included with schedule, manual OAK test,
+one counting line, reporting and optional foreign-object alarm retained.
+The segmentation overlay option is removed. Worker and Windows smoke tests now
+expect task=detect. Counting uses the bounding-box bottom instead of the mask
+bottom; line placement and overlap/missed-tyre behaviour MUST be retested.
+Existing v48_mask_bottom function already provides this bounding-box fallback.
+
+USE
+Upload ALL extracted contents to your GitHub repository on main. Keep
+.github/workflows/windows-portable.yml and run the Compatibility workflow.
+Do not replace just the model in an older source build that insists on segment.
+For an existing Python installation, replace the supplied source/helpers as well
+as tyre_detector.pt. For the Windows EXE, rebuild with the supplied workflow.
+Keep the previous installation and original model backed up for comparison.
+Start with Foreign detector and recording disabled for the N5030 speed test.
+Compare PERF OAK processing fps/track_avg_ms and an independently known tyre
+count. A smaller parameter count is not a guaranteed frame-rate improvement.
