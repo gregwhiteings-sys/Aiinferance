@@ -1,3 +1,7 @@
-Offline verification passed: OAK decode/NMS and letterbox mapping; blob identity and pipeline construction; ByteTrack ID continuity and one-frame miss recovery; actual CounterWorker OAK branch with CPU YOLO blocked, one count for repeated crossings of one ID; report reconciliation 16/16; schedule boundaries; manual test isolation; single line; foreign alarm; Qt controls at 3 window sizes.
-No OAK hardware is attached here. Integrated full-view inference, actual line position, reconnect, throughput, overlap handling and classification must be verified onsite. Windows EXE build and frozen-runtime validation must run in GitHub.
-Complete source smoke test passed locally: pinned CPU imports, native SciPy/torchvision operations, CPU video model/tracking, OAK blob/pipeline/adapter, foreign model inference, Qt controls. See SOURCE_SMOKE_RESULT.json.
+SMOOTH PREVIEW UPDATE — LOCAL VALIDATION
+Passed real independent capture-thread simulation: latest live image stays separate from matched AI frame; unmatched output cannot reach counting; periodic diagnostics; thread shutdown.
+Passed OAK decoder/NMS, letterbox mapping, blob hash/pipeline construction, tracker continuity and missed-frame recovery.
+Passed real counting worker simulation with CPU tyre YOLO blocked: one count per tracked ID and class reconciliation.
+Passed existing single-line, 16/16 reporting, schedule boundaries, manual test isolation and alarm tests.
+Passed Qt layout checks at three window sizes, plus complete source runtime smoke test.
+Windows frozen executable build and live 15 FPS preview/AI throughput require GitHub and camera tests. This update adds diagnostics; it does not establish or guarantee removal of the six-second stall's cause.

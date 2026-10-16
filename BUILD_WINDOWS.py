@@ -73,6 +73,7 @@ def main():
     # Smoke-test DB and auto-generated email template must never ship as user data.
     for name in ['data','reports']:
         shutil.rmtree(BUNDLE/name,ignore_errors=True);(BUNDLE/name).mkdir()
+    shutil.copy2(ROOT/'SMOOTH_PREVIEW_START_HERE.txt',BUNDLE/'SMOOTH_PREVIEW_START_HERE.txt')
     shutil.copy2(ROOT/'OAK_ONBOARD_START_HERE.txt',BUNDLE/'OAK_ONBOARD_START_HERE.txt')
     shutil.copy2(ROOT/'START_WINDOWS_BUILD.txt',BUNDLE/'START_HERE.txt')
     shutil.copy2(ROOT/'FOREIGN_DETECTOR_START_HERE.txt',BUNDLE/'FOREIGN_DETECTOR_START_HERE.txt')

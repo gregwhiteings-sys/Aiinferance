@@ -1,5 +1,5 @@
-# OAK onboard AI build
+# Smooth preview build
 
-Use `.github/workflows/windows-portable.yml`. Its Actions name is **TyreTrack Windows Portable (OAK Onboard AI)**. Upload the extracted files at repository root and run the workflow. No Colab conversion is needed: the compiled model is included.
+Upload extracted source files to repository root. Run **TyreTrack Windows Portable (OAK Onboard AI)** using `.github/workflows/windows-portable.yml`. Download the portable Windows artifact after success.
 
-Read OAK_ONBOARD_START_HERE.txt before starting the trial. This package requires an onsite count comparison; Windows build and packaged smoke tests run in GitHub.
+Read SMOOTH_PREVIEW_START_HERE.txt. New CAMERA setting: Smooth live or Matched AI overlays. No model conversion needed.

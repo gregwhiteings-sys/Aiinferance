@@ -1042,6 +1042,7 @@ class OakSource:
         self.device = None
         self.queue = None
         self.reader = None
+        self.preview_reader = None
         self.recorder = None
         self.record_queue = queue.Queue(maxsize=60)
         self.record_drops = 0
@@ -1061,10 +1062,27 @@ class OakSource:
         self.segment_frames = 0
         self.capture_fps = 20.0
         self.previous_camera_sequence = None
+        self.live_frame = None
+        self.live_frame_at = None
+        self.live_sequence = -1
+        self.live_error = None
+        self.preview_received = 0
+        self.preview_max_age_ms = 0.0
+        self.preview_max_loop_gap_ms = 0.0
+        self.preview_last_received = time.monotonic()
+        self.capture_diagnostic_since = time.monotonic()
+        self.sequence_gaps = 0
+        self.largest_sequence_gap = 0
+        self.nn_received = 0
+        self.pair_received = 0
+        self.max_nn_age_ms = 0.0
+        self.max_capture_loop_gap_ms = 0.0
+        self.worker_last_read_at = time.monotonic()
+        self.worker_max_read_gap_ms = 0.0
 
         from oak_ai import build_pipeline
         pipeline = build_pipeline(dai, resource_path("tyre_detector_oak.blob"))
-        self.capture_fps = 10.0
+        self.capture_fps = 15.0
         self.latest_neural_output = None
         self.last_read_neural_output = None
         self.pending_frames = {}
@@ -1085,6 +1103,10 @@ class OakSource:
             )
 
             self.nn_queue = self.device.getOutputQueue("nn", maxSize=8, blocking=False)
+            self.live_queue = self.device.getOutputQueue("live", maxSize=1, blocking=False)
+            self.preview_reader = threading.Thread(target=self._preview_loop,
+                name="OAK independent live preview", daemon=True)
+            self.preview_reader.start()
             self.reader = threading.Thread(
                 target=self._capture_loop,
                 name="OAK RGB capture and recorder",
@@ -1137,17 +1159,98 @@ class OakSource:
         self.segment_frames = 0
         log(f"OAK recording started: {path}")
 
+    def _packet_age_ms(self, packet):
+        try:
+            return max(0.0, (dai.Clock.now()-packet.getTimestamp()).total_seconds()*1000)
+        except Exception:
+            return -1.0
+
+    def _preview_loop(self):
+        previous_loop = time.monotonic()
+        try:
+            while not self.stop_event.is_set():
+                now = time.monotonic()
+                gap_ms = (now-previous_loop)*1000
+                previous_loop = now
+                packet = self.live_queue.tryGet()
+                with self.condition:
+                    self.preview_max_loop_gap_ms = max(self.preview_max_loop_gap_ms, gap_ms)
+                if packet is None:
+                    time.sleep(.003)
+                    continue
+                frame = cv2.cvtColor(packet.getCvFrame(), cv2.COLOR_RGB2BGR)
+                received = time.monotonic()
+                age = self._packet_age_ms(packet)
+                with self.condition:
+                    self.live_frame = frame
+                    self.live_sequence = int(packet.getSequenceNum())
+                    self.live_frame_at = received
+                    self.preview_last_received = received
+                    self.preview_received += 1
+                    self.preview_max_age_ms = max(self.preview_max_age_ms, age)
+                # Recording is fed by the independent camera stream, not AI output.
+                if RECORD_OAK_VIDEO:
+                    try:
+                        self.record_queue.put_nowait((frame, datetime.now()))
+                    except queue.Full:
+                        self.record_drops += 1
+        except Exception as exc:
+            self.live_error = str(exc)
+            log("OAK live preview FAULT; counting stream remains independent: "+str(exc))
+
+    def _stream_diagnostics(self, now, last_pair):
+        elapsed = now-self.capture_diagnostic_since
+        if elapsed < 10:
+            return
+        with self.condition:
+            live_silence = now-self.preview_last_received
+            message = ("OAK stream summary: "
+                f"camera_rx_fps={self.preview_received/elapsed:.1f}, "
+                f"nn_rx_fps={self.nn_received/elapsed:.1f}, matched_fps={self.pair_received/elapsed:.1f}, "
+                f"sequence_gaps={self.sequence_gaps}, largest_sequence_gap={self.largest_sequence_gap}; "
+                "gaps include inference skips and host latest-frame selection, not proven network loss; "
+                f"live_silence_ms={live_silence*1000:.0f}, ai_silence_ms={(now-last_pair)*1000:.0f}, "
+                f"max_camera_age_ms={self.preview_max_age_ms:.0f}, max_nn_age_ms={self.max_nn_age_ms:.0f}, "
+                f"max_capture_loop_pause_ms={self.max_capture_loop_gap_ms:.0f}, "
+                f"max_preview_loop_pause_ms={self.preview_max_loop_gap_ms:.0f}, "
+                f"max_worker_read_gap_ms={self.worker_max_read_gap_ms:.0f}, "
+                f"record_queue={self.record_queue.qsize()}, record_drops_total={self.record_drops}")
+            self.preview_received = 0
+            self.preview_max_age_ms = 0.0
+            self.preview_max_loop_gap_ms = 0.0
+            self.worker_max_read_gap_ms = 0.0
+        log(message)
+        self.nn_received = self.pair_received = self.sequence_gaps = self.largest_sequence_gap = 0
+        self.max_nn_age_ms = self.max_capture_loop_gap_ms = 0.0
+        self.capture_diagnostic_since = now
+
     def _capture_loop(self):
         last_packet_at = time.monotonic()
+        previous_loop = last_packet_at
+        stall_reported = False
 
         try:
             while not self.stop_event.is_set():
+                now = time.monotonic()
+                self.max_capture_loop_gap_ms = max(self.max_capture_loop_gap_ms, (now-previous_loop)*1000)
+                previous_loop = now
+                self._stream_diagnostics(now, last_packet_at)
+                if now-last_packet_at > 1.0 and not stall_reported:
+                    with self.condition:
+                        preview_silence = now-self.preview_last_received
+                    log(f"OAK AI STALL: no matched result for {now-last_packet_at:.2f}s; "
+                        f"preview_silence={preview_silence:.2f}s; pending_frames={len(self.pending_frames)}, "
+                        f"pending_outputs={len(self.pending_outputs)}; inspect stream summary for timing")
+                    stall_reported = True
                 # Match NN output and passthrough by camera sequence before publishing.
                 for queue_source, pending in [(self.queue, self.pending_frames),
                                               (self.nn_queue, self.pending_outputs)]:
-                    while True:
+                    for _drain in range(32):
                         incoming = queue_source.tryGet()
                         if incoming is None: break
+                        if queue_source is self.nn_queue:
+                            self.nn_received += 1
+                            self.max_nn_age_ms = max(self.max_nn_age_ms, self._packet_age_ms(incoming))
                         pending[int(incoming.getSequenceNum())] = incoming
                         while len(pending) > 16: pending.pop(min(pending))
                 matched = sorted(self.pending_frames.keys() & self.pending_outputs.keys())
@@ -1164,12 +1267,16 @@ class OakSource:
                 if packet is None:
                     if time.monotonic() - last_packet_at > 6:
                         raise RuntimeError(
-                            "No OAK RGB frames received for 6 seconds"
+                            "No matched OAK AI frames for 6 seconds (see stream timing diagnostics)"
                         )
                     time.sleep(0.005)
                     continue
 
+                if stall_reported:
+                    log(f"OAK AI RECOVERED: matched result gap {time.monotonic()-last_packet_at:.2f}s")
+                    stall_reported = False
                 last_packet_at = time.monotonic()
+                self.pair_received += 1
                 received_at = datetime.now()
                 # Remove inference letterbox and return the original 16:9 scene.
                 # getCvFrame returns planar RGB in RGB order; convert for Qt/OpenCV.
@@ -1186,11 +1293,9 @@ class OakSource:
                         previous is not None
                         and camera_sequence > previous + 1
                     ):
-                        log(
-                            "OAK recording WARNING: "
-                            f"{camera_sequence - previous - 1} "
-                            "camera frames were not received"
-                        )
+                        gap = camera_sequence-previous-1
+                        self.sequence_gaps += gap
+                        self.largest_sequence_gap = max(self.largest_sequence_gap, gap)
 
                     self.previous_camera_sequence = camera_sequence
                 except Exception:
@@ -1202,13 +1307,6 @@ class OakSource:
                     self.latest_frame_at = time.monotonic()
                     self.sequence += 1
                     self.condition.notify_all()
-                if RECORD_OAK_VIDEO:
-                    try:
-                        self.record_queue.put_nowait((frame, received_at))
-                    except queue.Full:
-                        self.record_drops += 1
-                        if self.record_drops == 1 or self.record_drops % 30 == 0:
-                            log(f"OAK MP4 overload: {self.record_drops} recording frames dropped; counting continues")
 
 
         except Exception as exc:
@@ -1266,6 +1364,9 @@ class OakSource:
                 return False, None, None
 
             self.last_read_sequence = self.sequence
+            now = time.monotonic()
+            self.worker_max_read_gap_ms = max(self.worker_max_read_gap_ms, (now-self.worker_last_read_at)*1000)
+            self.worker_last_read_at = now
             self.last_read_neural_output = self.latest_neural_output.copy()
             self.last_read_frame_at = self.latest_frame_at
             return (
@@ -1275,22 +1376,19 @@ class OakSource:
             )
 
     def preview_snapshot(self):
-        """For the GUI: one consistent newest-frame snapshot."""
+        """Independent camera image; never changes the matched counting observation."""
         with self.condition:
-            if self.latest_frame is None:
-                return None, self.sequence, None
-
-            return (
-                self.latest_frame.copy(),
-                self.sequence,
-                self.latest_frame_at,
-            )
+            if self.live_frame is None:
+                return None, self.live_sequence, None
+            return self.live_frame.copy(), self.live_sequence, self.live_frame_at
 
     def release(self):
         self.stop_event.set()
         with self.condition:
             self.condition.notify_all()
 
+        if self.preview_reader is not None and self.preview_reader.is_alive():
+            self.preview_reader.join(timeout=2)
         if self.reader is not None and self.reader.is_alive():
             self.reader.join(timeout=5)
 
@@ -2651,7 +2749,13 @@ class Main(QMainWindow):
         self.overlay_mode_combo.setCurrentText("None")
         self.overlay_mode_combo.currentTextChanged.connect(
             self.update_overlay_mode)
-        source_layout.addWidget(QLabel("AI detection display"))
+        self.oak_view_combo = QComboBox()
+        self.oak_view_combo.addItems(["Smooth live", "Matched AI overlays"])
+        self.oak_view_combo.setToolTip("Smooth live targets 15 FPS without AI overlays. Matched AI overlays shows boxes/labels on their exact analysed frame.")
+        self.oak_view_combo.currentTextChanged.connect(lambda _: self.update_overlay_mode(self.overlay_mode_combo.currentText()))
+        source_layout.addWidget(QLabel("OAK viewing mode"))
+        source_layout.addWidget(self.oak_view_combo)
+        source_layout.addWidget(QLabel("AI detection display (matched view)"))
         source_layout.addWidget(self.overlay_mode_combo)
 
         self.show_tyre_labels = QCheckBox("Show Tyre Labels")
@@ -3334,8 +3438,9 @@ class Main(QMainWindow):
 
         detections = ()
         mode = self.overlay_mode_combo.currentText()
-        # Labels require the matched inference frame even without boxes or masks.
-        if mode != "None" or self.show_tyre_labels.isChecked() or worker.foreign_enabled:
+        matched_view = self.oak_view_combo.currentText() == "Matched AI overlays"
+        # AI boxes and labels stay on the exact analysed frame; live view is independent.
+        if matched_view:
             overlay = worker.latest_oak_overlay()
             if overlay is None:
                 return
@@ -3343,13 +3448,16 @@ class Main(QMainWindow):
             frame = processed_frame.copy()
         else:
             frame, sequence, captured_at = worker.oak_source.preview_snapshot()
-        if frame is None or sequence == self._oak_preview_sequence:
+        display_key = (matched_view, sequence)
+        if frame is None or display_key == self._oak_preview_sequence:
             return
-        self._oak_preview_sequence = sequence
-        if mode == "Bounding Boxes":
+        self._oak_preview_sequence = display_key
+        if matched_view and mode == "Bounding Boxes":
             draw_detections(frame, detections)
-        elif mode == "Segmentation Mask":
+        elif matched_view and mode == "Segmentation Mask":
             v481_draw_masks(frame, result)
+        if not matched_view:
+            cv2.putText(frame, "LIVE - AI overlays in Matched view", (8,18), cv2.FONT_HERSHEY_SIMPLEX,.42,(255,255,255),1)
 
         draw_line_and_total(
             frame,
@@ -3377,7 +3485,7 @@ class Main(QMainWindow):
                 else -1
             )
             log(
-                "PERF OAK live preview: "
+                f"PERF OAK preview ({'matched' if matched_view else 'live'}): "
                 f"fps={self._oak_preview_frames / elapsed:.1f}, "
                 f"latest_frame_age_ms={age_ms:.0f}"
             )

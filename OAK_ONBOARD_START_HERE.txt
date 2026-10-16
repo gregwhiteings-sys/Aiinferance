@@ -20,6 +20,6 @@ Trial procedure:
 
 Existing 05:00–17:05 Brisbane schedule, report logic, manual test isolation and alert behavior are retained. They have offline tests. Actual startup/reconnect, physical camera performance, classification and count accuracy of this integrated build require an onsite test. The standalone square-view test achieved about 8 FPS; integrated performance has not been measured here.
 
-Recordings remain unannotated 480x270 segments at 10 FPS nominal; output may be lower if inference or transport skips frames. They show the full scene reconstructed from the network letterbox, rather than original high-resolution footage.
+See SMOOTH_PREVIEW_START_HERE.txt for viewing mode and diagnostics. Recordings remain unannotated 480x270 segments at 15 FPS nominal; output may be lower if inference or transport skips frames. They show the full scene reconstructed from the network letterbox, rather than original high-resolution footage.
 
 This source package is build-ready, not a prebuilt Windows EXE. Windows GitHub source and packaged smoke tests still have to pass. A camera is not available in the build runner; it validates blob integrity and pipeline construction without connecting.
