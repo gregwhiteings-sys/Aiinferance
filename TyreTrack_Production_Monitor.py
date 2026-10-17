@@ -730,8 +730,8 @@ def send_hourly_email(start, end):
     return send_message(subject, body, DASHBOARD_SNAPSHOT)
 
 
-def oak_in_operating_hours():
-    now = datetime.now(timezone(timedelta(hours=10)))
+def oak_in_operating_hours(now=None):
+    now = now or brisbane_now()
     return 5 <= now.hour and (now.hour < 17 or (now.hour == 17 and now.minute < 5))
 
 
@@ -1033,7 +1033,7 @@ class OakSource:
     640x360 MP4 segments, rotated at a keyframe after 15 minutes.
     """
 
-    def __init__(self, ip=""):
+    def __init__(self, ip="", foreign_enabled=False):
         if not DEPTHAI_OK:
             raise RuntimeError(
                 "DepthAI is not installed. Run INSTALL_DEPTHAI.bat."
@@ -1075,13 +1075,21 @@ class OakSource:
         self.worker_last_read_at = time.monotonic()
         self.worker_max_read_gap_ms = 0.0
 
-        from oak_ai import build_pipeline
-        pipeline = build_pipeline(dai, resource_path("tyre_detector_oak.blob"), recording=True)
+        from oak_rvc2 import build_pipeline
+        pipeline = build_pipeline(dai, resource_path("rvc2_models"), recording=True, foreign_enabled=foreign_enabled)
         self.capture_fps = 15.0
         self.latest_neural_output = None
         self.last_read_neural_output = None
         self.pending_frames = {}
         self.pending_outputs = {}
+        self.foreign_enabled = foreign_enabled
+        self.pending_foreign_frames = {}
+        self.pending_foreign_outputs = {}
+        self.latest_foreign = None
+        self.last_foreign_sequence = -1
+        self.foreign_started_at = time.monotonic()
+        self.foreign_received_at = self.foreign_started_at
+        self.foreign_pair_count = 0
 
         try:
             if ip.strip():
@@ -1098,6 +1106,8 @@ class OakSource:
             )
 
             self.nn_queue = self.device.getOutputQueue("nn", maxSize=8, blocking=False)
+            self.foreign_frame_queue = self.device.getOutputQueue("foreign_rgb", maxSize=4, blocking=False) if foreign_enabled else None
+            self.foreign_nn_queue = self.device.getOutputQueue("foreign_nn", maxSize=8, blocking=False) if foreign_enabled else None
             self.live_queue = self.device.getOutputQueue("live", maxSize=1, blocking=False)
             self.encoded_queue = self.device.getOutputQueue("recording", maxSize=120, blocking=False)
             self.preview_reader = threading.Thread(target=self._preview_loop,
@@ -1136,7 +1146,7 @@ class OakSource:
                 if packet is None:
                     time.sleep(.003)
                     continue
-                frame = cv2.cvtColor(packet.getCvFrame(), cv2.COLOR_RGB2BGR)
+                frame = packet.getCvFrame()
                 received = time.monotonic()
                 age = self._packet_age_ms(packet)
                 with self.condition:
@@ -1194,6 +1204,28 @@ class OakSource:
                         f"preview_silence={preview_silence:.2f}s; pending_frames={len(self.pending_frames)}, "
                         f"pending_outputs={len(self.pending_outputs)}; inspect stream summary for timing")
                     stall_reported = True
+                # Foreign frames pair independently: never apply a stale hazard to a new tyre frame.
+                if self.foreign_enabled:
+                    from oak_rvc2 import read_layers, unletterbox
+                    for q, pending in [(self.foreign_frame_queue,self.pending_foreign_frames),
+                                       (self.foreign_nn_queue,self.pending_foreign_outputs)]:
+                        for _ in range(32):
+                            incoming=q.tryGet()
+                            if incoming is None:break
+                            pending[int(incoming.getSequenceNum())]=incoming
+                            while len(pending)>16:pending.pop(min(pending))
+                    common=self.pending_foreign_frames.keys() & self.pending_foreign_outputs.keys()
+                    if common:
+                        seq=max(common)
+                        fr=unletterbox(self.pending_foreign_frames[seq].getCvFrame())
+                        raw=read_layers(self.pending_foreign_outputs[seq], 'foreign')
+                        with self.condition:
+                            self.foreign_received_at=time.monotonic()
+                            self.latest_foreign=(seq,fr,raw,self.foreign_received_at)
+                            self.foreign_pair_count+=1
+                        for pending in (self.pending_foreign_frames,self.pending_foreign_outputs):
+                            for old in list(pending):
+                                if old<=seq:del pending[old]
                 # Match NN output and passthrough by camera sequence before publishing.
                 for queue_source, pending in [(self.queue, self.pending_frames),
                                               (self.nn_queue, self.pending_outputs)]:
@@ -1211,7 +1243,8 @@ class OakSource:
                     matched_sequence = matched[-1]
                     packet = self.pending_frames[matched_sequence]
                     neural_packet = self.pending_outputs[matched_sequence]
-                    neural_values = np.asarray(neural_packet.getLayerFp16("output0"), dtype=np.float32)
+                    from oak_rvc2 import read_layers
+                    neural_values = read_layers(neural_packet,"tyre")
                     for pending in (self.pending_frames, self.pending_outputs):
                         for old in list(pending):
                             if old <= matched_sequence: del pending[old]
@@ -1231,9 +1264,10 @@ class OakSource:
                 self.pair_received += 1
                 received_at = datetime.now()
                 # Remove inference letterbox and return the original 16:9 scene.
-                # getCvFrame returns planar RGB in RGB order; convert for Qt/OpenCV.
+                # Compiled exports accept planar BGR; getCvFrame returns BGR for Qt/OpenCV.
                 rgb = packet.getCvFrame()
-                frame = cv2.cvtColor(cv2.resize(rgb[84:300], (480, 270)), cv2.COLOR_RGB2BGR)
+                from oak_rvc2 import unletterbox
+                frame = unletterbox(rgb)
 
                 oak_frame_received()
 
@@ -1320,13 +1354,22 @@ class OakSource:
             now = time.monotonic()
             self.worker_max_read_gap_ms = max(self.worker_max_read_gap_ms, (now-self.worker_last_read_at)*1000)
             self.worker_last_read_at = now
-            self.last_read_neural_output = self.latest_neural_output.copy()
+            self.last_read_neural_output = self.latest_neural_output
             self.last_read_frame_at = self.latest_frame_at
             return (
                 True,
                 self.latest_frame.copy(),
                 self.sequence,
             )
+
+    def read_foreign(self):
+        with self.condition:
+            if time.monotonic()-self.foreign_received_at > 6:
+                raise RuntimeError("No matched foreign OAK result for 6 seconds")
+            item=self.latest_foreign
+            if item is None or item[0]==self.last_foreign_sequence:return None
+            self.last_foreign_sequence=item[0]
+            return item
 
     def preview_snapshot(self):
         """Independent camera image; never changes the matched counting observation."""
@@ -1575,7 +1618,7 @@ class CounterWorker(QThread):
         self.foreign_enabled = False
         self.foreign_latched = False
         self.foreign_reset_pending = False
-        self.foreign_confidence = .65
+        self.foreign_confidence = .45
         self.foreign_every = 5
         self.foreign_region = (.03,.98,.18,.82)
         self.foreign_confirm = Confirmation()
@@ -1606,21 +1649,27 @@ class CounterWorker(QThread):
             self.foreign_reset_pending = False
         if not self.foreign_enabled or self.foreign_failed:
             return
-        if self.processing_frame % self.foreign_every:
+        if self.source_kind != "oak" and self.processing_frame % self.foreign_every:
             return
         try:
-            result = self.foreign_model.predict(frame, conf=self.foreign_confidence,
-                                                imgsz=480, device="cpu", verbose=False)[0]
+            if self.source_kind == "oak":
+                from oak_rvc2 import decode
+                item=self.oak_source.read_foreign()
+                if item is None:return
+                seq, frame, raw, received=item
+                if time.monotonic()-received>2:return
+                rows,_=decode(raw,self.foreign_confidence,.5)
+                candidates=[(row[:4].tolist(),int(row[5]),float(row[4])) for row in rows]
+            else:
+                result=self.foreign_model.predict(frame,conf=self.foreign_confidence,
+                                                   imgsz=416,device="cpu",verbose=False)[0]
+                candidates=[] if result.boxes is None else list(zip(result.boxes.xyxy.cpu().tolist(),
+                    result.boxes.cls.int().cpu().tolist(),result.boxes.conf.cpu().tolist()))
             height,width=frame.shape[:2]
             detections=[]
-            if result.boxes is not None:
-                for box,c,confidence in zip(result.boxes.xyxy.cpu().tolist(),
-                                           result.boxes.cls.int().cpu().tolist(),
-                                           result.boxes.conf.cpu().tolist()):
-                    # Class 5 has no verified training examples in the supplied model.
-                    if c not in range(5) or not in_region(box,width,height,*self.foreign_region):
-                        continue
-                    detections.append(dict(class_id=c,box=box,confidence=float(confidence)))
+            for box,c,confidence in candidates:
+                if c not in range(len(CLASSES)) or not in_region(box,width,height,*self.foreign_region):continue
+                detections.append(dict(class_id=c,box=box,confidence=float(confidence)))
             self.foreign_boxes=detections
             event=self.foreign_confirm.update(detections,time.monotonic())
             if event and not self.foreign_latched:
@@ -1658,27 +1707,28 @@ class CounterWorker(QThread):
                 )
 
             if self.source_kind == "oak":
-                from oak_ai import OakTracker
+                from oak_rvc2 import OakTracker
                 model = OakTracker()
-                log("Tyre inference: OAK RVC2 embedded normalization; CPU ByteTrack; full 16:9 view")
+                log("Tyre segmentation: OAK RVC2 416 BGR; CPU mask decoding and ByteTrack; full 16:9 view")
             else:
                 self.status.emit("Loading tyre detector...")
                 model = YOLO(str(model_path))
                 if model.task != "detect":
                     raise ValueError("This build requires the included detection-only tyre model")
 
-            if self.foreign_enabled:
+            if self.foreign_enabled and self.source_kind != "oak":
                 try:
-                    self.foreign_model = YOLO(str(resource_path("foreign_model/foreign_object_detector_DEMO.pt")))
+                    self.foreign_model = YOLO(str(resource_path("foreign_model/foreign_object.pt")))
                     actual=tuple(self.foreign_model.names[i] for i in range(len(self.foreign_model.names)))
                     if actual!=CLASSES:raise ValueError(f"Foreign class mapping mismatch: {actual}")
-                    self.foreign_status.emit("DEMO monitoring · 3 confirmations required")
+                    self.foreign_status.emit("Synthetic starter · PC inference · 3 confirmations required")
                 except Exception as exc:
                     self.foreign_failed=True
                     self.foreign_status.emit(f"FAULT loading foreign model: {exc}")
                     log("Foreign model load failed: "+str(exc))
             if self.source_kind == "oak":
-                source = OakSource(str(self.source or ""))
+                source = OakSource(str(self.source or ""), foreign_enabled=self.foreign_enabled)
+                if self.foreign_enabled:self.foreign_status.emit("Synthetic starter · OAK inference · 3 confirmations required")
                 self.oak_source = source
                 source_name = OAK_TEST_NAME if self.manual_test else OAK_NAME
             else:
@@ -2692,7 +2742,11 @@ class Main(QMainWindow):
         schedule_note = QLabel("05:00–17:05 Brisbane time. Connection retries every 60 seconds.")
         schedule_note.setObjectName("helper")
         schedule_note.setWordWrap(True)
-        self.auto_schedule.setChecked(get_state("auto_schedule", "1") == "1")
+        # Every launch arms production scheduling, including upgraded installations
+        # that previously saved Auto=off or a manual-stop pause for today.
+        set_state("auto_schedule", "1")
+        set_state("auto_paused_day", "")
+        self.auto_schedule.setChecked(True)
         self.auto_schedule.toggled.connect(self.auto_schedule_changed)
         source_layout.addWidget(self.auto_schedule)
         source_layout.addWidget(schedule_note)
@@ -2755,7 +2809,7 @@ class Main(QMainWindow):
         source_tab.addWidget(source_card)
         source_tab.addStretch()
 
-        foreign_card, foreign_layout = self.card("FOREIGN OBJECT DETECTOR · DEMO")
+        foreign_card, foreign_layout = self.card("FOREIGN OBJECT DETECTOR · SYNTHETIC STARTER")
         self.foreign_switch=QCheckBox("Enable foreign detector")
         self.foreign_switch.setChecked(get_state("foreign_enabled","0")=="1")
         self.foreign_switch.toggled.connect(self.foreign_enabled_changed)
@@ -2763,7 +2817,7 @@ class Main(QMainWindow):
         self.foreign_status_lbl=QLabel("Ready for next start" if self.foreign_switch.isChecked() else "Disabled")
         foreign_layout.addWidget(self.foreign_status_lbl)
         self.foreign_conf=QSlider(Qt.Horizontal);self.foreign_conf.setRange(30,95)
-        self.foreign_conf.setValue(int(get_state("foreign_confidence","65")))
+        self.foreign_conf.setValue(int(get_state("foreign_confidence","45")))
         self.foreign_conf_lbl=QLabel()
         self.foreign_every=QSlider(Qt.Horizontal);self.foreign_every.setRange(1,20)
         self.foreign_every.setValue(int(get_state("foreign_every","5")))
@@ -2781,7 +2835,7 @@ class Main(QMainWindow):
         self.foreign_conf.valueChanged.connect(self.save_foreign_settings)
         self.foreign_every.valueChanged.connect(self.save_foreign_settings)
         self.save_foreign_settings()
-        note=QLabel("Stop before changing settings. Orange trapezoid marks the conveyor region while running. A box centre must be inside it. Three matching detections latch the alarm. Synthetic demo model; class 'other' is not enabled. Video tests can also trigger the alarm.")
+        note=QLabel("Stop before changing settings. Orange trapezoid marks the conveyor region while running. A box centre must be inside it. Three matching detections latch the alarm. Only wheel_rim and person are trained. OAK processes every received foreign result; the frame interval applies to PC video tests. Video tests can also trigger the alarm.")
         foreign_layout.addWidget(note)
         self.alarm_reset_btn=QPushButton("Admin: reset alarm")
         self.alarm_reset_btn.clicked.connect(self.reset_foreign_alarm)
@@ -3166,7 +3220,7 @@ class Main(QMainWindow):
             self.alarm_banner.setText("FOREIGN DETECTOR FAULT — " + self.foreign_fault)
             self.alarm_banner.setStyleSheet("background:#704800;color:#ffe4a6;font-weight:800;padding:8px;")
         else:
-            self.alarm_banner.setText("Foreign detector · DEMO · " + self.foreign_monitor_status)
+            self.alarm_banner.setText("Foreign detector · STARTER · " + self.foreign_monitor_status)
             self.alarm_banner.setStyleSheet("background:#18352d;color:#b9e6cb;padding:5px;")
 
     def on_foreign_status(self, text):
@@ -4208,6 +4262,10 @@ class Main(QMainWindow):
 
 
 if __name__ == "__main__":
+    if "--oak-hardware-test" in sys.argv:
+        from oak_hardware_test import main as hardware_main
+        index=sys.argv.index("--oak-hardware-test")
+        sys.exit(hardware_main(sys.argv[index+1:],root=resource_path(".")))
     if "--build-smoke-test" in sys.argv:
         from build_support.smoke_test import run
         output = sys.argv[sys.argv.index("--build-smoke-test") + 1]

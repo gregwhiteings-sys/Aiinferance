@@ -4,7 +4,7 @@ numpy==1.26.4
 scipy==1.13.1
 opencv-python==4.10.0.84
 PyQt5==5.15.11
-ultralytics==8.4.156
+ultralytics==8.4.174
 depthai==2.30.0.0
 optree==0.13.1
 lap==0.5.12

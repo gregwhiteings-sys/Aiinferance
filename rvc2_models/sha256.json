@@ -1,0 +1,8 @@
+{
+  "foreign/config.json": "770cdde89ed942b861d65bce9a7c668d66b15a23dad51ef437d8cc712c1cf950",
+  "foreign/buildinfo.json": "43f024be8a2b2a260e023255735c4ba152497f3c34c80dae7eef48f338804f32",
+  "foreign/foreign_object.blob": "771f9952bd5d07941be228118988abb9890ceb482315a24e5d5123d39e9ca7e7",
+  "tyre/config.json": "960a42790ab488abe2f5248caba826959db9ec480ede3b55a9be55f8f6f90190",
+  "tyre/buildinfo.json": "859727c9f2d3ceac170adf78abc37437eb595f96d2bc40212958c32c583de637",
+  "tyre/tyre_detector.blob": "aeda6f6a08030f64ff85a130f84675afffd941f068225e2990a4888ac0c8903a"
+}

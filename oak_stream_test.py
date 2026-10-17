@@ -10,9 +10,11 @@ class Packet:
  def getSequenceNum(self):return self.seq
  def getTimestamp(self):return m.dai.Clock.now()
  def getCvFrame(self):
-  shape=(270,480,3) if self.seq==23 else (384,384,3)
+  shape=(270,480,3) if self.seq==23 else (416,416,3)
   return np.full(shape,self.seq,dtype=np.uint8)
- def getLayerFp16(self,name):return np.full(18144,.123,dtype=np.float32)
+ def getLayerFp16(self,name):
+  shape=(32,104,104) if name=='protos_output' else ((32 if 'masks' in name else 7),{1:52,2:26,3:13}[int(name[6])],{1:52,2:26,3:13}[int(name[6])])
+  return np.full(np.prod(shape),.123,dtype=np.float32)
 class Q:
  def __init__(self,items):self.items=list(items)
  def tryGet(self):return self.items.pop(0) if self.items else None
@@ -28,7 +30,7 @@ try:
  source=m.OakSource('')
  ok,frame,seq=source.read();assert ok and frame.shape==(270,480,3)
  assert np.all(frame==10), 'Counting must use matched AI passthrough, never newer preview'
- assert np.allclose(source.last_read_neural_output,.123)
+ assert all(np.allclose(v,.123) for v in source.last_read_neural_output.values())
  deadline=time.monotonic()+1
  while source.preview_snapshot()[0] is None and time.monotonic()<deadline:time.sleep(.005)
  live,live_seq,_=source.preview_snapshot();assert live_seq==23 and np.all(live==23)
@@ -72,3 +74,27 @@ finally:
  if source:source.release()
  m.dai.Device=original;m.OAK_RECORDINGS=original_folder;m.RECORD_OAK_VIDEO=False
 print('PASS: actual OakSource recording thread writes and finalises playable MP4 on shutdown')
+# Both neural branches must pair with THEIR OWN passthrough frame sequence.
+class ForeignDevice(Device):
+ def __init__(self,*args):
+  super().__init__(*args)
+  self.queues['foreign_rgb']=Q([Packet(17),Packet(18)])
+  self.queues['foreign_nn']=Q([Packet(18,True),Packet(199,True)])
+try:
+ m.dai.Device=ForeignDevice
+ source=m.OakSource('',foreign_enabled=True)
+ ok,frame,seq=source.read();assert ok and np.all(frame==10)
+ deadline=time.monotonic()+1
+ item=None
+ while item is None and time.monotonic()<deadline:
+  item=source.read_foreign()
+  if item is None:time.sleep(.005)
+ assert item is not None and item[0]==18 and np.all(item[1]==18)
+ assert source.read_foreign() is None,'Same inference must not increment confirmation twice'
+ source.foreign_received_at=time.monotonic()-7
+ try:source.read_foreign();raise AssertionError('Stale foreign stream accepted')
+ except RuntimeError:pass
+finally:
+ if source:source.release()
+ m.dai.Device=original
+print('PASS: independent foreign/tyre sequence pairing, no replay confirmation, foreign stream stall detection')

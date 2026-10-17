@@ -1,8 +1,1 @@
-[
-  "fitted_rim",
-  "bare_rim",
-  "person",
-  "metal_object",
-  "traffic_cone",
-  "other_foreign_object"
-]
+["wheel_rim", "person"]

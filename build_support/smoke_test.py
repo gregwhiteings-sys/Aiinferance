@@ -51,8 +51,11 @@ def run(app_module, output):
         adapter=OakTracker()
         tracked=adapter.track_oak(np.zeros((270,480,3),dtype=np.uint8),raw.ravel(),.35,.5,False)
         assert tracked.boxes.id is not None and len(tracked.boxes)==1
+        stage='new dual RVC2 model integrity and pipeline'
+        import oak_rvc2
+        oak_rvc2.build_pipeline(depthai,app_module.resource_path('rvc2_models'),recording=True,foreign_enabled=True)
         stage='foreign model load and inference' 
-        foreign=YOLO(str(app_module.resource_path('foreign_model/foreign_object_detector_DEMO.pt')))
+        foreign=YOLO(str(app_module.resource_path('foreign_model/foreign_object.pt')))
         from foreign_alarm import CLASSES
         assert tuple(foreign.names[i] for i in range(len(foreign.names)))==CLASSES
         foreign.predict(np.zeros((360,640,3),dtype=np.uint8),imgsz=480,device='cpu',verbose=False)
