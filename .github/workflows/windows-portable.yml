@@ -31,7 +31,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force build_logs | Out-Null
-          $required = @('TyreTrack_Production_Monitor.py','tyre_detector.pt','count_line.py','hourly_dashboard.py','BUILD_WINDOWS.py','requirements-windows.txt','build_support/smoke_test.py','foreign_alarm.py','oak_ai.py','oak_recording.py','background_export.py','tyre_detector_oak.blob','foreign_model/foreign_object_detector_DEMO.pt')
+          $required = @('TyreTrack_Production_Monitor.py','tyre_detector.pt','count_line.py','hourly_dashboard.py','BUILD_WINDOWS.py','requirements-windows.txt','build_support/smoke_test.py','foreign_alarm.py','oak_ai.py','oak_recording.py','oak_rvc2.py','oak_hardware_test.py','rvc2_models/sha256.json','background_export.py','tyre_detector_oak.blob','foreign_model/foreign_object.pt')
           foreach ($path in $required) {
             if (!(Test-Path -LiteralPath $path)) { throw "Missing repository-root file: $path. Extract the source ZIP before uploading; do not upload only the ZIP." }
           }
@@ -60,6 +60,10 @@ jobs:
 
       - name: Validate application logic
         run: |
+          python oak_foreign_worker_test.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python oak_rvc2_test.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python oak_fov_test.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python oak_recording_test.py
@@ -81,6 +85,8 @@ jobs:
           python single_line_test.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python foreign_alarm_test.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python auto_schedule_test.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python after_hours_test.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
