@@ -10,12 +10,9 @@ qt=QApplication.instance() or QApplication([])
 m.log_count=lambda *args:None;m.oak_session_allowed=lambda manual:True
 m.YOLO=lambda *args,**kwargs:(_ for _ in ()).throw(AssertionError('OAK path must not instantiate CPU YOLO'))
 def raw(kind,cl=0):
- suffix='yolov8' if kind=='tyre' else 'yolov6r2'
- out={f'output{i}_{suffix}':np.zeros((1,7,s,s),np.float32) for i,s in enumerate((52,26,13),1)}
- if kind=='tyre':
-  out.update({f'output{i}_masks':np.zeros((1,32,s,s),np.float32) for i,s in enumerate((52,26,13),1)})
-  out['protos_output']=np.zeros((1,32,104,104),np.float32)
- else:out['output1_'+suffix][0,:,26,26]=[5,5,5,5,.99,.99 if cl==0 else .01,.99 if cl==1 else .01]
+ if kind=='tyre':return np.zeros(18144,np.float32)
+ out={f'output{i}_yolov6r2':np.zeros((1,7,s,s),np.float32) for i,s in enumerate((52,26,13),1)}
+ out['output1_yolov6r2'][0,:,26,26]=[5,5,5,5,.99,.99 if cl==0 else .01,.99 if cl==1 else .01]
  return out
 for class_id in (0,1):
  class Source:

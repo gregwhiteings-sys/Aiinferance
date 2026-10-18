@@ -37,3 +37,23 @@ observe(w,40);w.processing_frame+=21;observe(w,80)
 assert w.session_count==0,'Stale track must not count'
 assert all(token not in source for token in ['end_line_pos','end_line_ratio','self.line_ids','line_progress'])
 print('PASS: removed-line crossing ignored; single crossing counts once; reverse direction; segment bounds; stale track; second-line controls removed')
+
+# Count the first observed centre just beyond the line, without a far-side delay.
+w=make()
+for y in [40,55,58,59]:observe(w,y)
+assert w.session_count==0
+observe(w,60);assert w.session_count==1
+for y in [58,60,40,80]:observe(w,y)
+assert w.session_count==1, 'Same ID must not count twice after jitter/reversal'
+w=make('Bottom to Top')
+for y in [80,65,60,59]:observe(w,y)
+assert w.session_count==0
+observe(w,58);assert w.session_count==1
+# A new ID seen only inside the approach deadband must not arm from tiny jitter.
+w=make()
+for y in [58,60,58,60]:observe(w,y)
+assert w.session_count==0
+from count_line import count_point
+assert count_point((20,20,80,80),101,101)==(50,50)
+assert count_point((-20,-20,80,80),101,101)==(40,40)
+print('PASS: red-dot centre geometry; first frame beyond line; exact-line touch ignored; once-per-ID; approach jitter rejected')

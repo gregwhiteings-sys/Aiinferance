@@ -9,23 +9,26 @@ logged=[];statuses=[]
 m.log_count=lambda *args:logged.append(args)
 m.oak_session_allowed=lambda manual:True
 m.YOLO=lambda *a,**k:(_ for _ in ()).throw(AssertionError('OAK must not load CPU tyre YOLO'))
-ys=list(range(30,13,-1))+list(range(13,31))
+ys=list(range(250,95,-5))+list(range(95,251,5))
 class SimulatedOak:
  def __init__(self,ip,foreign_enabled=False):self.index=0;self.last_read_frame_at=time.monotonic()
  def read(self):
   if self.index==len(ys):worker.running=False;return False,None,None
-  raw={f'output{i}_yolov8':np.zeros((1,7,s,s),np.float32) for i,s in enumerate((52,26,13),1)}
-  raw.update({f'output{i}_masks':np.zeros((1,32,s,s),np.float32) for i,s in enumerate((52,26,13),1)})
-  raw['protos_output']=np.zeros((1,32,104,104),np.float32)
-  raw['output1_yolov8'][0,:,ys[self.index],26]=[5,4,5,4,.95,.95,.01]
-  self.last_read_neural_output=raw;self.index+=1;self.last_read_frame_at=time.monotonic()
+  raw=np.zeros((6,3024),dtype=np.float32);raw[:,0]=[192,ys[self.index],80,60,.95,.01]
+  self.last_read_neural_output=raw.ravel();self.index+=1;self.last_read_frame_at=time.monotonic()
   return True,np.zeros((270,480,3),dtype=np.uint8),self.index
  def release(self):pass
 m.OakSource=SimulatedOak
 worker=m.CounterWorker('oak','','Bottom to Top',.35,.5)
+counted_frames=[]
+worker.counted.connect(lambda *args:counted_frames.append(worker.processing_frame))
 worker.status.connect(statuses.append)
 worker.run()
 assert not any(s.startswith('ERROR') for s in statuses),statuses
 assert worker.session_count==1 and len(logged)==1,(worker.session_count,logged,statuses)
 assert worker.session_type_counts['passenger']==1
+assert len(counted_frames)==1
+y=ys[counted_frames[0]-1]
+assert (y-84)*1.25 < .59*269 < (ys[counted_frames[0]-2]-84)*1.25, (counted_frames,y)
+print('PASS: actual ByteTrack worker counts on red-dot centre crossing, not box bottom')
 print('PASS: actual OAK worker bypasses CPU YOLO, tracks packets, counts single crossing once and reconciles Passenger total')

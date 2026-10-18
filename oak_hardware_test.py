@@ -54,9 +54,9 @@ def main(argv=None,root=None):
                                 while len(buf)>16:buf.pop(min(buf))
                         common=frames.keys() & outputs.keys()
                         for seq in sorted(common):
-                            p=outputs[seq];frame=unletterbox(frames[seq].getCvFrame())
+                            p=outputs[seq];frame=unletterbox(frames[seq].getCvFrame(),kind)
                             raw=read_layers(p,kind)
-                            boxes,masks=decode(raw,.45,.5,with_masks=kind=='tyre')
+                            boxes,_=decode(raw,.45,.5)
                             counts[kind]+=1;detections[kind]+=len(boxes);last_seen[kind]=time.monotonic()
                             latencies[kind].append(max(0,(dai.Clock.now()-p.getTimestamp()).total_seconds()*1000))
                             sequence[kind]=seq

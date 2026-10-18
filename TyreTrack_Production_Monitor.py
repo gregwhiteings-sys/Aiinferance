@@ -78,7 +78,7 @@ bootstrap_frozen_dlls()
 
 import cv2
 from ultralytics import YOLO
-from count_line import segment_bounds, crosses_segment
+from count_line import segment_bounds, crosses_segment, count_point
 from hourly_dashboard import hourly_snapshot, brisbane_now
 from foreign_alarm import CLASSES, Confirmation, in_region, read_json, write_json, set_password, verify_password, make_tone
 
@@ -251,6 +251,26 @@ def set_state(key, value):
             """,
             (key, str(value)),
         )
+
+
+def verify_operator_pin(candidate):
+    """Four digit PIN; salted PBKDF2 hash in local SQLite state."""
+    import hashlib, hmac, secrets
+    if not (isinstance(candidate, str) and len(candidate) == 4 and candidate.isascii() and candidate.isdigit()):
+        return False
+    saved = get_state("operator_pin_hash", "")
+    if not saved:
+        # Initial deployment PIN requested by site administrator.
+        salt = secrets.token_hex(16)
+        digest = hashlib.pbkdf2_hmac("sha256", b"0808", bytes.fromhex(salt), 200000).hex()
+        set_state("operator_pin_hash", salt + ":" + digest)
+        saved = salt + ":" + digest
+    try:
+        salt, digest = saved.split(":", 1)
+        computed = hashlib.pbkdf2_hmac("sha256", candidate.encode("ascii"), bytes.fromhex(salt), 200000)
+        return hmac.compare_digest(computed, bytes.fromhex(digest))
+    except (ValueError, TypeError):
+        return False
 
 
 def db_count_since(start):
@@ -604,6 +624,7 @@ def production_snapshot(now=None):
     day_start = now.replace(hour=5, minute=0, second=0, microsecond=0)
     cutoff = day_start.replace(hour=17, minute=5)
     effective = min(now, cutoff)
+    working_day = now.weekday() < 5
     with sqlite3.connect(DB, timeout=15) as con:
         slots, best, _ = hourly_snapshot(con, source=OAK_NAME, now=effective)
         rows = con.execute("SELECT ts, metric_utc FROM counts WHERE source=? ORDER BY id", (OAK_NAME,)).fetchall()
@@ -618,6 +639,11 @@ def production_snapshot(now=None):
         except (ValueError, TypeError, OverflowError):
             continue
     events.sort()
+    if not working_day:
+        return dict(day_start=day_start, day_end=cutoff, daily=len(events), all_time=all_time,
+                    current_hour=0, best_count=best["count"] if best else 0,
+                    no_count_incidents=0, no_flow_minutes=0.0,
+                    no_count_status="WEEKEND · CLOSED", alert_times=[], flow_per_minute=0.0)
     incidents = 0
     alert_times = []
     no_flow = 0.0
@@ -732,7 +758,7 @@ def send_hourly_email(start, end):
 
 def oak_in_operating_hours(now=None):
     now = now or brisbane_now()
-    return 5 <= now.hour and (now.hour < 17 or (now.hour == 17 and now.minute < 5))
+    return now.weekday() < 5 and 5 <= now.hour and (now.hour < 17 or (now.hour == 17 and now.minute < 5))
 
 
 def oak_session_allowed(manual_test=False):
@@ -940,8 +966,7 @@ def draw_detections(frame, detections):
         if x2 <= x1 or y2 <= y1:
             continue
 
-        centre_x = (x1 + x2) // 2
-        centre_y = (y1 + y2) // 2
+        centre_x, centre_y = count_point((x1,y1,x2,y2),width,height)
 
         inset_x = round((x2 - x1) * VISUAL_BOX_INSET)
         inset_y = round((y2 - y1) * VISUAL_BOX_INSET)
@@ -1217,7 +1242,7 @@ class OakSource:
                     common=self.pending_foreign_frames.keys() & self.pending_foreign_outputs.keys()
                     if common:
                         seq=max(common)
-                        fr=unletterbox(self.pending_foreign_frames[seq].getCvFrame())
+                        fr=unletterbox(self.pending_foreign_frames[seq].getCvFrame(), 'foreign')
                         raw=read_layers(self.pending_foreign_outputs[seq], 'foreign')
                         with self.condition:
                             self.foreign_received_at=time.monotonic()
@@ -1409,149 +1434,10 @@ class OakSource:
 
 
 
-def v48_mask_bottom(mask, box, frame_width, frame_height):
-    """
-    Return the bottom-most segmentation-mask pixel.
-
-    If the detector has no usable segmentation mask,
-    fall back to the bounding-box bottom edge.
-
-    The returned coordinate is in original-frame pixels.
-    """
-    import numpy as np
-
-    x1, y1, x2, y2 = box
-
-    if mask is None:
-        return float(y2)
-
-    try:
-        mask = np.asarray(mask)
-
-        if mask.ndim != 2:
-            return float(y2)
-
-        if mask.shape != (frame_height, frame_width):
-            mask = cv2.resize(
-                mask.astype("float32"),
-                (frame_width, frame_height),
-                interpolation=cv2.INTER_NEAREST
-            )
-
-        active_rows = np.where(mask > 0.5)[0]
-
-        if active_rows.size == 0:
-            return float(y2)
-
-        return float(active_rows[-1])
-
-    except Exception:
-        return float(y2)
 
 
 
 
-def v481_draw_masks(frame, result, opacity=0.38, id_offset=0, show_labels=False):
-    """
-    Draw genuine segmentation masks and tracking IDs.
-
-    No bounding rectangles are drawn.
-    The original frame is modified in place.
-    """
-
-    import numpy as np
-
-    if result.masks is None:
-        return frame
-
-    height, width = frame.shape[:2]
-
-    masks = result.masks.data.cpu().numpy()
-
-    if result.boxes is None:
-        return frame
-
-    boxes = result.boxes.xyxy.cpu().numpy()
-
-    if result.boxes.id is not None:
-        ids = [int(v) + id_offset for v in result.boxes.id.int().cpu().tolist()]
-    else:
-        ids = [-1] * len(masks)
-
-    confidences = result.boxes.conf.cpu().tolist()
-
-    colours = [
-        (255, 90, 40),
-        (40, 210, 120),
-        (220, 80, 220),
-        (40, 180, 255),
-    ]
-
-    for index, mask in enumerate(masks):
-
-        if index >= len(boxes):
-            break
-
-        colour = colours[index % len(colours)]
-
-        if mask.shape != (height, width):
-            mask = cv2.resize(
-                mask.astype("float32"),
-                (width, height),
-                interpolation=cv2.INTER_NEAREST
-            )
-
-        binary = (mask > 0.5).astype("uint8")
-
-        if not binary.any():
-            continue
-
-        # Transparent mask fill.
-        frame[binary > 0] = (
-            frame[binary > 0].astype("float32")
-            * (1.0 - opacity)
-            + np.array(colour, dtype="float32")
-            * opacity
-        ).astype("uint8")
-
-        # Actual tyre outline.
-        contours, _ = cv2.findContours(
-            binary,
-            cv2.RETR_EXTERNAL,
-            cv2.CHAIN_APPROX_SIMPLE
-        )
-
-        cv2.drawContours(
-            frame,
-            contours,
-            -1,
-            colour,
-            2
-        )
-
-        x1, y1, x2, y2 = boxes[index].astype(int)
-
-        tyre_id = ids[index]
-        confidence = confidences[index]
-
-        label = (
-            f"TYRE {tyre_id} "
-            f"{confidence:.2f}"
-        )
-
-        if show_labels:
-            cv2.putText(
-                frame,
-                label,
-                (max(0, x1), max(20, y1 - 8)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.45,
-                (255, 255, 255),
-                1,
-                cv2.LINE_AA
-            )
-
-    return frame
 
 
 class CounterWorker(QThread):
@@ -1709,7 +1595,7 @@ class CounterWorker(QThread):
             if self.source_kind == "oak":
                 from oak_rvc2 import OakTracker
                 model = OakTracker()
-                log("Tyre segmentation: OAK RVC2 416 BGR; CPU mask decoding and ByteTrack; full 16:9 view")
+                log("Tyre detection: OAK RVC2 384 RGB; CPU decoding and ByteTrack; detection only; full 16:9 view")
             else:
                 self.status.emit("Loading tyre detector...")
                 model = YOLO(str(model_path))
@@ -1879,11 +1765,6 @@ class CounterWorker(QThread):
                         result.boxes.cls.int().cpu().tolist()
                     )
 
-                    # Masks and boxes are aligned by detection index.
-                    masks = None
-                    if result.masks is not None:
-                        masks = result.masks.data.cpu().numpy()
-
                     for detection_index, (
                         box, track_id, confidence, class_id
                     ) in enumerate(
@@ -1912,22 +1793,8 @@ class CounterWorker(QThread):
                         x1, y1, x2, y2 = (
                             int(value) for value in box
                         )
-                        cx = (x1 + x2) // 2
-                        cy = (y1 + y2) // 2
-
-                        tyre_mask = None
-                        if (
-                            masks is not None
-                            and detection_index < len(masks)
-                        ):
-                            tyre_mask = masks[detection_index]
-
-                        counting_y = v48_mask_bottom(
-                            tyre_mask,
-                            box,
-                            width,
-                            height
-                        )
+                        cx, cy = count_point((x1,y1,x2,y2),width,height)
+                        counting_y = float(cy)
 
                         self.last_seen_frame[track_id] = self.processing_frame
                         if confidence >= self.confidence:
@@ -1982,19 +1849,20 @@ class CounterWorker(QThread):
                         margin=V48_HYSTERESIS_PX*math.sqrt(1+ls*ls)
                         stable=abs(side)>=margin
                         crossed=False
-                        # Compare only confirmed observations outside the deadband.
+                        # Arm on a stable approach; count at the red-dot centre crossing.
+                        # Keep a stable reference to reject approach-side jitter.
                         # Require the same ID to have been seen recently; stale
                         # re-associations must not create phantom crossings.
                         gap=self.processing_frame-self.previous_observation_frame.get(key,-10000)
-                        if (stable and previous is not None and gap<=V48_MAX_TRACK_GAP
+                        if (previous is not None and gap<=V48_MAX_TRACK_GAP
                                 and track_id in self.confirmed_ids
                                 and track_id not in self.counted_ids):
                             if self.direction == "Bottom to Top":
-                                crossed=previous>=margin and side<=-margin
+                                crossed=previous>=margin and side<0
                             elif self.direction == "Top to Bottom":
-                                crossed=previous<=-margin and side>=margin
+                                crossed=previous<=-margin and side>0
                             else:
-                                crossed=(previous<=-margin and side>=margin) or (previous>=margin and side<=-margin)
+                                crossed=(previous<=-margin and side>0) or (previous>=margin and side<0)
                         if crossed:
                             crossed=crosses_segment(previous,side,self.previous_x.get(key,cx),cx,ll,rr)
                         if crossed:
@@ -2050,9 +1918,7 @@ class CounterWorker(QThread):
                             result,
                         )
                 else:
-                    if self.overlay_mode == "Segmentation Mask":
-                        v481_draw_masks(frame, result)
-                    elif self.overlay_mode == "Bounding Boxes":
+                    if self.overlay_mode == "Bounding Boxes":
                         draw_detections(frame, detections)
                     draw_line_and_total(
                         frame,
@@ -2739,7 +2605,7 @@ class Main(QMainWindow):
         )
         source_layout.addWidget(self.source_combo)
         self.auto_schedule = QCheckBox("Auto connect and count")
-        schedule_note = QLabel("05:00–17:05 Brisbane time. Connection retries every 60 seconds.")
+        schedule_note = QLabel("Mon–Fri 05:00–17:05 Brisbane time. Connection retries every 60 seconds.")
         schedule_note.setObjectName("helper")
         schedule_note.setWordWrap(True)
         # Every launch arms production scheduling, including upgraded installations
@@ -2770,12 +2636,12 @@ class Main(QMainWindow):
         )
         self.overlay_mode_combo = QComboBox()
         self.overlay_mode_combo.addItems(["None", "Bounding Boxes"])
-        self.overlay_mode_combo.setCurrentText("None")
+        self.overlay_mode_combo.setCurrentText("Bounding Boxes")
         self.overlay_mode_combo.currentTextChanged.connect(
             self.update_overlay_mode)
         self.oak_view_combo = QComboBox()
-        self.oak_view_combo.addItems(["Smooth live", "Matched AI overlays"])
-        self.oak_view_combo.setToolTip("Smooth live targets 15 FPS without AI overlays. Matched AI overlays shows boxes/labels on their exact analysed frame.")
+        self.oak_view_combo.addItems(["Smooth (no boxes)", "Show Boxes (AI matched)"])
+        self.oak_view_combo.setToolTip("Smooth: live preview without AI boxes. Show Boxes: analysed frame with detection boxes and labels.")
         self.oak_view_combo.currentTextChanged.connect(lambda _: self.update_overlay_mode(self.overlay_mode_combo.currentText()))
         source_layout.addWidget(QLabel("OAK viewing mode"))
         source_layout.addWidget(self.oak_view_combo)
@@ -3484,7 +3350,7 @@ class Main(QMainWindow):
 
         detections = ()
         mode = self.overlay_mode_combo.currentText()
-        matched_view = self.oak_view_combo.currentText() == "Matched AI overlays"
+        matched_view = self.oak_view_combo.currentText() == "Show Boxes (AI matched)"
         # AI boxes and labels stay on the exact analysed frame; live view is independent.
         if matched_view:
             overlay = worker.latest_oak_overlay()
@@ -3498,12 +3364,10 @@ class Main(QMainWindow):
         if frame is None or display_key == self._oak_preview_sequence:
             return
         self._oak_preview_sequence = display_key
-        if matched_view and mode == "Bounding Boxes":
+        if matched_view:
             draw_detections(frame, detections)
-        elif matched_view and mode == "Segmentation Mask":
-            v481_draw_masks(frame, result)
         if not matched_view:
-            cv2.putText(frame, "LIVE - AI overlays in Matched view", (8,18), cv2.FONT_HERSHEY_SIMPLEX,.42,(255,255,255),1)
+            cv2.putText(frame, "SMOOTH LIVE - NO BOXES", (8,18), cv2.FONT_HERSHEY_SIMPLEX,.42,(255,255,255),1)
 
         draw_line_and_total(
             frame,
@@ -3771,7 +3635,18 @@ class Main(QMainWindow):
             else:
                 self.status_lbl.setText(f"Auto OAK start failed; retry in 60 seconds: {exc}")
 
+    def confirm_operator_pin(self, action):
+        pin, ok = QInputDialog.getText(self, "Administrator PIN", "Enter 4-digit PIN to " + action + ":", QLineEdit.Password)
+        if not ok:
+            return False
+        if verify_operator_pin(pin):
+            return True
+        QMessageBox.warning(self, "Access denied", "Incorrect 4-digit administrator PIN. TyreTrack will continue running.")
+        return False
+
     def stop(self, checked=False, scheduled=False):
+        if not scheduled and not self.confirm_operator_pin("stop counting"):
+            return
         if not scheduled and self.worker is not None and self.worker.source_kind == "oak" and not self.worker.manual_test:
             set_state("auto_paused_day", brisbane_now().date().isoformat())
         if self.worker is not None:
@@ -4229,6 +4104,9 @@ class Main(QMainWindow):
             self.email_thread.start()
 
     def closeEvent(self, event):
+        if not self.confirm_operator_pin("close TyreTrack"):
+            event.ignore()
+            return
         self.closing = True
         self.oak_preview_timer.stop()
 
